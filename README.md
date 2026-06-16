@@ -28,7 +28,7 @@ GO
 02_seed_mock_data.sql
 ```
 
-## 后端启动
+## 后端初始化启动
 
 ```powershell
 cd backend
@@ -46,7 +46,18 @@ python app.py
 
 默认地址：`http://127.0.0.1:5001/api`
 
-## 前端启动
+
+
+## 后端再次启动
+
+```shell
+cd backend
+python app.py
+```
+
+
+
+## 前端初始化启动
 
 ```powershell
 cd frontend
@@ -56,6 +67,19 @@ npm run dev
 ```
 
 默认地址：`http://localhost:3000`
+
+
+
+## 前端再次启动
+
+```shell
+cd frontend
+npm run dev
+```
+
+默认地址：`http://localhost:3000`
+
+
 
 ## 已实现的业务页面
 
