@@ -493,6 +493,7 @@ export default function Page() {
   }, [currentUser]);
   const activeConfig = useMemo(() => visibleConfigs.find((config) => config.key === activeKey), [activeKey, visibleConfigs]);
   const canManage = isAdminUser(currentUser);
+  const canCreate = canManage || (!canManage && ["appointments", "appeals", "points-additions"].includes(activeKey));
 
   function showToast(title: string, description = "") {
     setToast({ open: true, title, description });
@@ -572,8 +573,12 @@ export default function Page() {
   }
 
   async function saveRecord(payload: Record<string, string | number | null>) {
-    if (!canManage) {
+    if (!canManage && editingRow) {
       showToast("权限不足", "普通车主仅支持查看自己的相关信息");
+      return;
+    }
+    if (!canManage && !canCreate) {
+      showToast("权限不足", "当前页面不支持普通车主新增");
       return;
     }
     if (!activeConfig) return;
@@ -633,6 +638,24 @@ export default function Page() {
     setAiResult(data.rows);
     showToast("智能查询完成", `已返回 ${data.rows.length} 行，日志编号 ${data.query_id}`);
     if (activeKey === "ai-query-logs") await refreshTable();
+  }
+
+  async function reviewLearning(additionId: Row[string], status: "已通过" | "已驳回") {
+    await apiSend(`/points-additions/${additionId}/review`, "POST", {
+      status,
+      approver_opinion: status === "已通过" ? "学习材料审核通过" : "学习材料不符合要求"
+    });
+    showToast("审批完成", `学习申请已${status}`);
+    await refreshTable();
+    await refreshDashboard();
+  }
+
+  async function annualReset() {
+    const year = new Date().getFullYear();
+    const data = await apiSend<{ year: number; created_periods: number }>("/scoring-periods/annual-reset", "POST", { year });
+    showToast("年度重置完成", `${data.year} 年新增 ${data.created_periods} 个记分周期`);
+    await refreshDashboard();
+    if (activeConfig) await refreshTable();
   }
 
   if (!currentUser) {
@@ -728,6 +751,11 @@ export default function Page() {
                   >
                     <RefreshCcw size={16} /> 刷新
                   </button>
+                  {canManage && (
+                    <button onClick={annualReset} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm hover:bg-slate-50">
+                      <Gauge size={16} /> 年度重置
+                    </button>
+                  )}
                   <button onClick={logout} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm hover:bg-slate-50">
                     <LogOut size={16} /> 退出
                   </button>
@@ -815,7 +843,7 @@ export default function Page() {
                         <button onClick={() => refreshTable()} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm hover:bg-slate-50">
                           <Search size={16} /> 查询
                         </button>
-                        {canManage && <button
+                        {canCreate && <button
                           onClick={() => {
                             setEditingRow(null);
                             setDialogOpen(true);
@@ -833,19 +861,19 @@ export default function Page() {
                             {activeConfig.columns.map((column) => (
                               <th key={column.key} className="px-4 py-3 font-medium">{column.label}</th>
                             ))}
-                            {canManage && <th className="px-4 py-3 text-right font-medium">操作</th>}
+                            {(canManage || activeConfig.key === "points-additions") && <th className="px-4 py-3 text-right font-medium">操作</th>}
                           </tr>
                         </thead>
                         <tbody>
                           {loading ? (
                             <tr>
-                              <td colSpan={activeConfig.columns.length + (canManage ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">
+                              <td colSpan={activeConfig.columns.length + ((canManage || activeConfig.key === "points-additions") ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">
                                 <Loader2 className="mx-auto mb-2 animate-spin" size={24} /> 正在加载
                               </td>
                             </tr>
                           ) : table.items.length === 0 ? (
                             <tr>
-                              <td colSpan={activeConfig.columns.length + (canManage ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">暂无数据</td>
+                              <td colSpan={activeConfig.columns.length + ((canManage || activeConfig.key === "points-additions") ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">暂无数据</td>
                             </tr>
                           ) : (
                             table.items.map((row) => (
@@ -855,9 +883,9 @@ export default function Page() {
                                     {column.key.includes("status") || column.key === "is_active" ? <Badge value={row[column.key]} /> : <span className="line-clamp-2">{display(row[column.key])}</span>}
                                   </td>
                                 ))}
-                                {canManage && <td className="px-4 py-3">
+                                {(canManage || activeConfig.key === "points-additions") && <td className="px-4 py-3">
                                   <div className="flex justify-end gap-2">
-                                    <button
+                                    {canManage && <button
                                       onClick={() => {
                                         setEditingRow(row);
                                         setDialogOpen(true);
@@ -865,13 +893,23 @@ export default function Page() {
                                       className="inline-flex min-h-9 items-center gap-1 rounded-md border border-line px-3 text-sm hover:bg-white"
                                     >
                                       <SquarePen size={15} /> 编辑
-                                    </button>
-                                    <button
+                                    </button>}
+                                    {canManage && <button
                                       onClick={() => setDeleteRow(row)}
                                       className="inline-flex min-h-9 items-center gap-1 rounded-md border border-rose-200 px-3 text-sm text-rose-700 hover:bg-rose-50"
                                     >
                                       <Trash2 size={15} /> 删除
-                                    </button>
+                                    </button>}
+                                    {canManage && activeConfig.key === "points-additions" && row.status === "待审批" && (
+                                      <>
+                                        <button onClick={() => reviewLearning(row.addition_id, "已通过")} className="inline-flex min-h-9 items-center gap-1 rounded-md border border-emerald-200 px-3 text-sm text-emerald-700 hover:bg-emerald-50">
+                                          <Check size={15} /> 通过
+                                        </button>
+                                        <button onClick={() => reviewLearning(row.addition_id, "已驳回")} className="inline-flex min-h-9 items-center gap-1 rounded-md border border-rose-200 px-3 text-sm text-rose-700 hover:bg-rose-50">
+                                          <X size={15} /> 驳回
+                                        </button>
+                                      </>
+                                    )}
                                   </div>
                                 </td>}
                               </tr>

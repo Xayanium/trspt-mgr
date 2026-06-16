@@ -168,6 +168,424 @@ def resource_access(resource_name: str, user: dict[str, Any]) -> tuple[bool, tup
     return False, ("", [])
 
 
+def query_one(sql: str, params: list[Any] | None = None) -> dict[str, Any] | None:
+    rows = execute_query(sql, params or [])
+    return rows[0] if rows else None
+
+
+def today_sql() -> str:
+    return "CONVERT(date, SYSDATETIME())"
+
+
+def create_penalty(
+    *,
+    violation_id: Any | None,
+    source_vehicle_id: Any | None,
+    period_id: Any | None,
+    trigger_type: str,
+    penalty_type: str,
+    points_deducted: int = 0,
+    suspension_days: int | None = None,
+    start_date_sql: str = "CONVERT(date, SYSDATETIME())",
+    end_date_sql: str | None = None,
+    target_vehicle_id: Any | None = None,
+    target_dept_id: Any | None = None,
+    target_person_id: Any | None = None,
+    target_house_id: Any | None = None,
+    status: str = "执行中",
+) -> Any:
+    sql = f"""
+        INSERT INTO dbo.t_penalty
+            (violation_id, source_vehicle_id, period_id, trigger_type, penalty_type, points_deducted,
+             suspension_days, start_date, end_date, target_vehicle_id, target_dept_id, target_person_id,
+             target_house_id, status)
+        OUTPUT INSERTED.penalty_id
+        VALUES (?, ?, ?, ?, ?, ?, ?, {start_date_sql}, {end_date_sql or 'NULL'}, ?, ?, ?, ?, ?);
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            sql,
+            [
+                violation_id,
+                source_vehicle_id,
+                period_id,
+                trigger_type,
+                penalty_type,
+                points_deducted,
+                suspension_days,
+                target_vehicle_id,
+                target_dept_id,
+                target_person_id,
+                target_house_id,
+                status,
+            ],
+        )
+        return cursor.fetchone()[0]
+
+
+def add_or_refresh_blacklist(vehicle_id: Any, penalty_id: Any | None, blacklist_type: str, reason: str, days: int | None = None) -> None:
+    existing = query_one(
+        "SELECT blacklist_id FROM dbo.t_blacklist WHERE vehicle_id = ? AND is_active = 1;",
+        [vehicle_id],
+    )
+    if existing:
+        execute_non_query(
+            """
+            UPDATE dbo.t_blacklist
+            SET blacklist_type = ?, reason = ?, penalty_id = COALESCE(?, penalty_id),
+                end_date = CASE WHEN ? IS NULL THEN NULL ELSE DATEADD(day, ?, CONVERT(date, SYSDATETIME())) END
+            WHERE blacklist_id = ?;
+            """,
+            [blacklist_type, reason, penalty_id, days, days, existing["blacklist_id"]],
+        )
+        return
+    execute_non_query(
+        """
+        INSERT INTO dbo.t_blacklist
+            (vehicle_id, blacklist_type, reason, source_type, penalty_id, start_date, end_date, is_active)
+        VALUES (?, ?, ?, N'处罚触发', ?, CONVERT(date, SYSDATETIME()),
+                CASE WHEN ? IS NULL THEN NULL ELSE DATEADD(day, ?, CONVERT(date, SYSDATETIME())) END, 1);
+        """,
+        [vehicle_id, blacklist_type, reason, penalty_id, days, days],
+    )
+
+
+def ensure_scoring_period(vehicle_id: Any, year: int) -> dict[str, Any]:
+    period = query_one(
+        "SELECT * FROM dbo.t_scoring_period WHERE vehicle_id = ? AND [year] = ?;",
+        [vehicle_id, year],
+    )
+    if period:
+        return period
+    period_id = insert_and_return_id(
+        "t_scoring_period",
+        ["vehicle_id", "year", "initial_points", "deducted_points_total", "added_points_total", "add_count", "has_danger_violation", "is_active"],
+        [vehicle_id, year, 12, 0, 0, 0, 0, 1],
+        "period_id",
+    )
+    return query_one("SELECT * FROM dbo.t_scoring_period WHERE period_id = ?;", [period_id]) or {"period_id": period_id, "deducted_points_total": 0}
+
+
+def apply_vehicle_suspension(vehicle_id: Any, days: int, reason: str, violation_id: Any, period_id: Any, points: int, trigger_type: str = "累计扣分") -> Any:
+    penalty_id = create_penalty(
+        violation_id=violation_id,
+        source_vehicle_id=vehicle_id,
+        period_id=period_id,
+        trigger_type=trigger_type,
+        penalty_type="暂停入校",
+        points_deducted=points,
+        suspension_days=days,
+        end_date_sql=f"DATEADD(day, {days}, CONVERT(date, SYSDATETIME()))",
+        target_vehicle_id=vehicle_id,
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_vehicle
+        SET register_status = N'暂停',
+            status_start_date = CONVERT(date, SYSDATETIME()),
+            status_end_date = DATEADD(day, ?, CONVERT(date, SYSDATETIME()))
+        WHERE vehicle_id = ? AND register_status <> N'永久禁止';
+        """,
+        [days, vehicle_id],
+    )
+    return penalty_id
+
+
+def apply_vehicle_thresholds(vehicle: dict[str, Any], period: dict[str, Any], previous_total: int, current_total: int, violation_id: Any, points: int) -> None:
+    vehicle_id = vehicle["vehicle_id"]
+    vehicle_type = vehicle["vehicle_type"]
+    if vehicle_type == "B":
+        if previous_total < 6 <= current_total:
+            penalty_id = create_penalty(
+                violation_id=violation_id,
+                source_vehicle_id=vehicle_id,
+                period_id=period["period_id"],
+                trigger_type="累计扣分",
+                penalty_type="预约黑名单",
+                points_deducted=0,
+                target_vehicle_id=vehicle_id,
+            )
+            add_or_refresh_blacklist(vehicle_id, penalty_id, "永久", "B 类车辆单车累计扣分达到 6 分，列入预约黑名单")
+        return
+
+    if vehicle_type == "C" and previous_total < 12 <= current_total:
+        apply_vehicle_suspension(vehicle_id, 365, "C 类车辆累计扣分达到 12 分", violation_id, period["period_id"], points)
+        return
+
+    if vehicle_type != "A":
+        return
+
+    thresholds = [(12, 15), (24, 30), (36, 365)]
+    for threshold, days in thresholds:
+        if previous_total < threshold <= current_total:
+            apply_vehicle_suspension(
+                vehicle_id,
+                days,
+                f"A 类车辆累计扣分达到 {threshold} 分",
+                violation_id,
+                period["period_id"],
+                0,
+            )
+            if threshold == 24 and vehicle.get("registrant_id"):
+                create_penalty(
+                    violation_id=violation_id,
+                    source_vehicle_id=vehicle_id,
+                    period_id=period["period_id"],
+                    trigger_type="累计扣分",
+                    penalty_type="谈话提醒",
+                    target_person_id=vehicle["registrant_id"],
+                    status="待执行",
+                )
+
+
+def upsert_b_summary_and_penalty(violation: dict[str, Any], points: int) -> None:
+    if points <= 0 or not violation.get("appointment_id"):
+        return
+    appointment = query_one(
+        """
+        SELECT appointment_id, appointer_type, appointer_dept_id, appointer_person_id, appointer_house_id
+        FROM dbo.t_appointment
+        WHERE appointment_id = ?;
+        """,
+        [violation["appointment_id"]],
+    )
+    if not appointment:
+        return
+    appointer_type = appointment["appointer_type"]
+    year = int(str(violation["violation_time"])[:4])
+    target_field = {
+        "单位": "appointer_dept_id",
+        "个人": "appointer_person_id",
+        "房屋": "appointer_house_id",
+    }[appointer_type]
+    target_id = appointment[target_field]
+    if not target_id:
+        return
+
+    existing = query_one(
+        f"""
+        SELECT summary_id, accumulated_points
+        FROM dbo.t_b_appointer_violation_summary
+        WHERE appointer_type = ? AND {target_field} = ? AND [year] = ?;
+        """,
+        [appointer_type, target_id, year],
+    )
+    previous_total = int(existing["accumulated_points"]) if existing else 0
+    current_total = previous_total + points
+    if existing:
+        execute_non_query(
+            """
+            UPDATE dbo.t_b_appointer_violation_summary
+            SET accumulated_points = ?, last_violation_time = ?, penalty_triggered = CASE WHEN ? = 1 THEN 1 ELSE penalty_triggered END
+            WHERE summary_id = ?;
+            """,
+            [current_total, violation["violation_time"], 0, existing["summary_id"]],
+        )
+    else:
+        values = {
+            "appointer_type": appointer_type,
+            "appointer_dept_id": appointment["appointer_dept_id"],
+            "appointer_person_id": appointment["appointer_person_id"],
+            "appointer_house_id": appointment["appointer_house_id"],
+            "year": year,
+            "accumulated_points": current_total,
+            "last_violation_time": violation["violation_time"],
+            "penalty_triggered": 0,
+        }
+        insert_and_return_id(
+            "t_b_appointer_violation_summary",
+            list(values.keys()),
+            list(values.values()),
+            "summary_id",
+        )
+
+    if appointer_type == "单位" and previous_total < 24 <= current_total:
+        create_penalty(
+            violation_id=violation["violation_id"],
+            source_vehicle_id=violation["vehicle_id"],
+            period_id=violation["period_id"],
+            trigger_type="累计扣分",
+            penalty_type="通报单位",
+            target_dept_id=target_id,
+            status="已完成",
+        )
+    elif appointer_type == "个人" and previous_total < 24 <= current_total:
+        create_penalty(
+            violation_id=violation["violation_id"],
+            source_vehicle_id=violation["vehicle_id"],
+            period_id=violation["period_id"],
+            trigger_type="累计扣分",
+            penalty_type="暂停因私预约",
+            suspension_days=15,
+            end_date_sql="DATEADD(day, 15, CONVERT(date, SYSDATETIME()))",
+            target_person_id=target_id,
+        )
+        execute_non_query(
+            """
+            UPDATE dbo.t_registrant
+            SET appointment_status = N'暂停', appointment_suspend_until = DATEADD(day, 15, CONVERT(date, SYSDATETIME()))
+            WHERE registrant_id = ?;
+            """,
+            [target_id],
+        )
+    elif appointer_type == "房屋" and previous_total < 12 <= current_total:
+        create_penalty(
+            violation_id=violation["violation_id"],
+            source_vehicle_id=violation["vehicle_id"],
+            period_id=violation["period_id"],
+            trigger_type="累计扣分",
+            penalty_type="取消房屋预约",
+            suspension_days=30,
+            end_date_sql="DATEADD(day, 30, CONVERT(date, SYSDATETIME()))",
+            target_house_id=target_id,
+        )
+        execute_non_query(
+            """
+            UPDATE dbo.t_house
+            SET appointment_status = N'暂停', appointment_suspend_until = DATEADD(day, 30, CONVERT(date, SYSDATETIME()))
+            WHERE house_id = ?;
+            """,
+            [target_id],
+        )
+
+
+def process_confirmed_violation(violation_id: Any) -> None:
+    violation = query_one(
+        """
+        SELECT v.violation_id, v.vehicle_id, v.appointment_id, v.rule_code, v.violation_time, v.status,
+               r.points_deducted, r.violation_level, r.is_malicious,
+               veh.vehicle_type, veh.registrant_id
+        FROM dbo.t_violation AS v
+        JOIN dbo.t_violation_rule AS r ON r.rule_code = v.rule_code
+        JOIN dbo.t_vehicle AS veh ON veh.vehicle_id = v.vehicle_id
+        WHERE v.violation_id = ?;
+        """,
+        [violation_id],
+    )
+    if not violation or violation["status"] != "已确认":
+        return
+
+    vehicle = {
+        "vehicle_id": violation["vehicle_id"],
+        "vehicle_type": violation["vehicle_type"],
+        "registrant_id": violation["registrant_id"],
+    }
+    year = int(str(violation["violation_time"])[:4])
+    period = ensure_scoring_period(violation["vehicle_id"], year)
+    violation["period_id"] = period["period_id"]
+
+    if violation["is_malicious"]:
+        penalty_id = create_penalty(
+            violation_id=violation_id,
+            source_vehicle_id=violation["vehicle_id"],
+            period_id=period["period_id"],
+            trigger_type="恶性行为",
+            penalty_type="永久禁止",
+            target_vehicle_id=violation["vehicle_id"],
+        )
+        execute_non_query(
+            """
+            UPDATE dbo.t_vehicle
+            SET register_status = N'永久禁止', status_start_date = CONVERT(date, SYSDATETIME()), status_end_date = NULL
+            WHERE vehicle_id = ?;
+            """,
+            [violation["vehicle_id"]],
+        )
+        add_or_refresh_blacklist(violation["vehicle_id"], penalty_id, "永久", "恶性交通行为，永久禁止入校")
+        return
+
+    points = int(violation["points_deducted"] or 0)
+    previous_total = int(period.get("deducted_points_total") or 0)
+    current_total = previous_total + points
+    is_danger = points >= 12 or "危险" in str(violation["violation_level"])
+    execute_non_query(
+        """
+        UPDATE dbo.t_scoring_period
+        SET deducted_points_total = ?, has_danger_violation = CASE WHEN ? = 1 THEN 1 ELSE has_danger_violation END
+        WHERE period_id = ?;
+        """,
+        [current_total, 1 if is_danger else 0, period["period_id"]],
+    )
+
+    if points > 0:
+        create_penalty(
+            violation_id=violation_id,
+            source_vehicle_id=violation["vehicle_id"],
+            period_id=period["period_id"],
+            trigger_type="单次违规",
+            penalty_type="扣分",
+            points_deducted=points,
+            target_vehicle_id=violation["vehicle_id"],
+            status="已完成",
+        )
+
+    if is_danger and points >= 12:
+        apply_vehicle_suspension(
+            violation["vehicle_id"],
+            60,
+            "危险违规一次性扣 12 分",
+            violation_id,
+            period["period_id"],
+            points,
+            "单次违规",
+        )
+        create_penalty(
+            violation_id=violation_id,
+            source_vehicle_id=violation["vehicle_id"],
+            period_id=period["period_id"],
+            trigger_type="单次违规",
+            penalty_type="全校通报",
+            target_vehicle_id=violation["vehicle_id"],
+            status="已完成",
+        )
+    else:
+        apply_vehicle_thresholds(vehicle, {"period_id": period["period_id"]}, previous_total, current_total, violation_id, points)
+
+    if violation["vehicle_type"] == "B":
+        upsert_b_summary_and_penalty(violation, points)
+
+
+def restriction_reason_for_appointment(appointment_id: Any) -> str | None:
+    appointment = query_one(
+        """
+        SELECT a.*, v.vehicle_type, v.register_status, v.status_end_date
+        FROM dbo.t_appointment AS a
+        JOIN dbo.t_vehicle AS v ON v.vehicle_id = a.vehicle_id
+        WHERE a.appointment_id = ?;
+        """,
+        [appointment_id],
+    )
+    if not appointment:
+        return "预约记录不存在"
+    if appointment["register_status"] == "永久禁止":
+        return "车辆已永久禁止入校"
+    if appointment["register_status"] == "暂停":
+        active = query_one(
+            "SELECT CASE WHEN ? IS NULL OR ? >= CONVERT(date, SYSDATETIME()) THEN 1 ELSE 0 END AS active;",
+            [appointment["status_end_date"], appointment["status_end_date"]],
+        )
+        if active and active["active"] == 1:
+            return "车辆仍处于暂停入校期"
+    if query_one("SELECT blacklist_id FROM dbo.t_blacklist WHERE vehicle_id = ? AND is_active = 1;", [appointment["vehicle_id"]]):
+        return "车辆在有效黑名单中"
+    if appointment["appointer_type"] == "个人" and appointment["appointer_person_id"]:
+        person = query_one(
+            "SELECT appointment_status, appointment_suspend_until FROM dbo.t_registrant WHERE registrant_id = ?;",
+            [appointment["appointer_person_id"]],
+        )
+        if person and person["appointment_status"] != "正常" and (person["appointment_suspend_until"] is None or str(person["appointment_suspend_until"]) >= str(query_one(f"SELECT {today_sql()} AS today;")["today"])):
+            return "预约人预约权限处于暂停/取消状态"
+    if appointment["appointer_type"] == "房屋" and appointment["appointer_house_id"]:
+        house = query_one(
+            "SELECT appointment_status, appointment_suspend_until FROM dbo.t_house WHERE house_id = ?;",
+            [appointment["appointer_house_id"]],
+        )
+        if house and house["appointment_status"] != "正常" and (house["appointment_suspend_until"] is None or str(house["appointment_suspend_until"]) >= str(query_one(f"SELECT {today_sql()} AS today;")["today"])):
+            return "房屋预约权限处于暂停/取消状态"
+    return None
+
+
 @app.get("/api/health")
 def health():
     try:
@@ -384,15 +802,81 @@ def get_one_resource(resource_name: str, record_id: str):
 
 @app.post("/api/<resource_name>")
 def create_resource(resource_name: str):
-    user, error = require_admin()
+    user, error = require_user()
     if error:
         return error
+    owner_creatable = {"appointments", "appeals", "points-additions"}
+    if not is_admin(user) and not (is_owner(user) and resource_name in owner_creatable):
+        return fail("当前用户无权新增该资源", 403)
     resource = get_resource(resource_name)
     payload = request.get_json(force=True) or {}
+
+    if is_owner(user):
+        registrant_id = user["registrant_id"]
+        if resource_name == "appointments":
+            vehicle = query_one("SELECT vehicle_id, plate_number FROM dbo.t_vehicle WHERE vehicle_id = ? AND registrant_id = ?;", [payload.get("vehicle_id"), registrant_id])
+            if not vehicle:
+                return fail("只能为本人车辆提交预约")
+            payload["plate_number"] = vehicle["plate_number"]
+            payload["appointer_type"] = "个人"
+            payload["appointer_person_id"] = registrant_id
+            payload["appointer_dept_id"] = None
+            payload["appointer_house_id"] = None
+            payload["status"] = "待审批"
+            payload["approver_id"] = None
+            payload["approved_at"] = None
+        elif resource_name == "appeals":
+            violation = query_one(
+                """
+                SELECT v.violation_id
+                FROM dbo.t_violation AS v
+                JOIN dbo.t_vehicle AS veh ON veh.vehicle_id = v.vehicle_id
+                WHERE v.violation_id = ? AND veh.registrant_id = ?;
+                """,
+                [payload.get("violation_id"), registrant_id],
+            )
+            if not violation:
+                return fail("只能对本人车辆违规提交申诉")
+            payload["applicant_id"] = registrant_id
+            payload["status"] = "待处理"
+            payload["handler_id"] = None
+            payload["handler_opinion"] = None
+            payload["handled_at"] = None
+        elif resource_name == "points-additions":
+            vehicle = query_one("SELECT vehicle_id, vehicle_type FROM dbo.t_vehicle WHERE vehicle_id = ? AND registrant_id = ?;", [payload.get("vehicle_id"), registrant_id])
+            if not vehicle:
+                return fail("只能为本人车辆提交学习申请")
+            if vehicle["vehicle_type"] != "A":
+                return fail("当前规则仅允许 A 类注册车辆提交学习申请")
+            period = query_one(
+                """
+                SELECT TOP 1 period_id, deducted_points_total, add_count
+                FROM dbo.t_scoring_period
+                WHERE vehicle_id = ? AND is_active = 1
+                ORDER BY [year] DESC;
+                """,
+                [payload.get("vehicle_id")],
+            )
+            if not period:
+                return fail("车辆没有活跃记分周期，无法提交学习申请")
+            if int(period["deducted_points_total"]) not in (12, 24):
+                return fail("只有累计扣分达到 12 或 24 分时才能提交学习申请")
+            if int(period["add_count"]) >= 2:
+                return fail("本年度学习恢复次数已达上限")
+            payload["period_id"] = period["period_id"]
+            payload["applicant_id"] = registrant_id
+            payload["addition_points"] = payload.get("addition_points") or 12
+            payload["status"] = "待审批"
+            payload["approver_id"] = None
+            payload["approver_opinion"] = None
+            payload["approved_at"] = None
+
     columns, values = clean_payload(payload, resource.writable)
     if not columns:
         return fail("没有可写入的字段")
     record_id = insert_and_return_id(resource.table, columns, values, resource.pk)
+    if resource_name == "violations":
+        process_confirmed_violation(record_id)
     return ok({"id": record_id}, f"{resource.title}已新增", 201)
 
 
@@ -438,6 +922,10 @@ def review_appointment(appointment_id: int):
     approver_id = payload.get("approver_id")
     if status not in {"已通过", "已驳回", "已取消"}:
         return fail("预约状态只能是已通过、已驳回或已取消")
+    if status == "已通过":
+        reason = restriction_reason_for_appointment(appointment_id)
+        if reason:
+            return fail(f"预约审批被拦截：{reason}")
     rowcount = execute_non_query(
         """
         UPDATE dbo.t_appointment
@@ -475,6 +963,124 @@ def handle_appeal(appeal_id: int):
     return ok({"affected": rowcount}, "申诉处理结果已保存")
 
 
+@app.post("/api/points-additions/<int:addition_id>/review")
+def review_points_addition(addition_id: int):
+    user, error = require_admin()
+    if error:
+        return error
+    payload = request.get_json(force=True) or {}
+    status = payload.get("status")
+    opinion = payload.get("approver_opinion")
+    if status not in {"已通过", "已驳回"}:
+        return fail("学习申请审批状态只能是已通过或已驳回")
+    addition = query_one(
+        """
+        SELECT a.*, p.deducted_points_total, p.add_count, v.vehicle_type, v.register_status, v.status_end_date
+        FROM dbo.t_points_addition_log AS a
+        JOIN dbo.t_scoring_period AS p ON p.period_id = a.period_id
+        JOIN dbo.t_vehicle AS v ON v.vehicle_id = a.vehicle_id
+        WHERE a.addition_id = ?;
+        """,
+        [addition_id],
+    )
+    if not addition:
+        return fail("学习申请不存在", 404)
+    if addition["status"] != "待审批":
+        return fail("该学习申请已经处理")
+    if status == "已通过":
+        if addition["vehicle_type"] != "A":
+            return fail("仅 A 类车辆可通过学习恢复权限")
+        if int(addition["deducted_points_total"]) not in (12, 24):
+            return fail("只有累计扣分为 12 或 24 分时才能通过学习申请")
+        if int(addition["add_count"]) >= 2:
+            return fail("本年度学习恢复次数已达上限")
+        execute_non_query(
+            """
+            UPDATE dbo.t_scoring_period
+            SET added_points_total = added_points_total + ?, add_count = add_count + 1
+            WHERE period_id = ?;
+            """,
+            [addition["addition_points"], addition["period_id"]],
+        )
+        expired = True
+        if addition["status_end_date"]:
+            row = query_one("SELECT CASE WHEN ? < CONVERT(date, SYSDATETIME()) THEN 1 ELSE 0 END AS expired;", [addition["status_end_date"]])
+            expired = bool(row and row["expired"] == 1)
+        if expired and addition["register_status"] == "暂停":
+            execute_non_query(
+                """
+                UPDATE dbo.t_vehicle
+                SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
+                WHERE vehicle_id = ? AND register_status = N'暂停';
+                """,
+                [addition["vehicle_id"]],
+            )
+    execute_non_query(
+        """
+        UPDATE dbo.t_points_addition_log
+        SET status = ?, approver_id = ?, approver_opinion = ?, approved_at = SYSDATETIME()
+        WHERE addition_id = ?;
+        """,
+        [status, user["user_id"], opinion, addition_id],
+    )
+    return ok({"id": addition_id}, "学习申请审批结果已保存")
+
+
+@app.post("/api/scoring-periods/annual-reset")
+def annual_reset():
+    user, error = require_admin()
+    if error:
+        return error
+    payload = request.get_json(force=True) or {}
+    year = int(payload.get("year") or query_one("SELECT YEAR(SYSDATETIME()) AS [year];")["year"])
+    if year < 2020 or year > 2099:
+        return fail("年度必须在 2020 到 2099 之间")
+    execute_non_query("UPDATE dbo.t_scoring_period SET is_active = 0 WHERE [year] <> ?;", [year])
+    vehicle_ids = execute_query("SELECT vehicle_id FROM dbo.t_vehicle WHERE register_status <> N'注销';")
+    created = 0
+    for vehicle in vehicle_ids:
+        existing = query_one("SELECT period_id FROM dbo.t_scoring_period WHERE vehicle_id = ? AND [year] = ?;", [vehicle["vehicle_id"], year])
+        if not existing:
+            insert_and_return_id(
+                "t_scoring_period",
+                ["vehicle_id", "year", "initial_points", "deducted_points_total", "added_points_total", "add_count", "has_danger_violation", "is_active"],
+                [vehicle["vehicle_id"], year, 12, 0, 0, 0, 0, 1],
+                "period_id",
+            )
+            created += 1
+        else:
+            execute_non_query("UPDATE dbo.t_scoring_period SET is_active = 1 WHERE period_id = ?;", [existing["period_id"]])
+    execute_non_query(
+        """
+        UPDATE dbo.t_vehicle
+        SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
+        WHERE register_status = N'暂停' AND status_end_date IS NOT NULL AND status_end_date < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_blacklist
+        SET is_active = 0
+        WHERE is_active = 1 AND end_date IS NOT NULL AND end_date < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_registrant
+        SET appointment_status = N'正常', appointment_suspend_until = NULL
+        WHERE appointment_status = N'暂停' AND appointment_suspend_until IS NOT NULL AND appointment_suspend_until < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_house
+        SET appointment_status = N'正常', appointment_suspend_until = NULL
+        WHERE appointment_status = N'暂停' AND appointment_suspend_until IS NOT NULL AND appointment_suspend_until < CONVERT(date, SYSDATETIME());
+        """
+    )
+    return ok({"year": year, "created_periods": created}, "年度重置完成")
+
+
 @app.get("/api/gate-check")
 def gate_check():
     user, error = require_admin()
@@ -496,6 +1102,30 @@ def gate_check():
         return ok({"can_enter": False, "reason": "未找到车辆档案", "vehicle": None})
 
     vehicle = rows[0]
+    if vehicle["register_status"] == "暂停" and vehicle["status_end_date"]:
+        expired = query_one(
+            "SELECT CASE WHEN ? < CONVERT(date, SYSDATETIME()) THEN 1 ELSE 0 END AS expired;",
+            [vehicle["status_end_date"]],
+        )
+        if expired and expired["expired"] == 1:
+            execute_non_query(
+                """
+                UPDATE dbo.t_vehicle
+                SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
+                WHERE vehicle_id = ? AND register_status = N'暂停';
+                """,
+                [vehicle["vehicle_id"]],
+            )
+            vehicle["register_status"] = "正常"
+            vehicle["status_end_date"] = None
+    execute_non_query(
+        """
+        UPDATE dbo.t_blacklist
+        SET is_active = 0
+        WHERE vehicle_id = ? AND is_active = 1 AND end_date IS NOT NULL AND end_date < CONVERT(date, SYSDATETIME());
+        """,
+        [vehicle["vehicle_id"]],
+    )
     blacklist = execute_query(
         """
         SELECT TOP 1 blacklist_id, blacklist_type, reason, start_date, end_date, is_active
