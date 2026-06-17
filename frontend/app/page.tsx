@@ -94,9 +94,11 @@ const resourceConfigs: ResourceConfig[] = [
       { key: "vehicle_id", label: "ID" },
       { key: "plate_number", label: "车牌" },
       { key: "vehicle_type", label: "类型" },
-      { key: "registrant_id", label: "登记人" },
+      { key: "registrant_name", label: "登记人" },
       { key: "register_status", label: "状态" },
-      { key: "status_end_date", label: "截止日期" }
+      { key: "register_date", label: "注册日期" },
+      { key: "status_end_date", label: "截止日期" },
+      { key: "remark", label: "备注" }
     ],
     fields: [
       { name: "plate_number", label: "车牌号", placeholder: "川A12345" },
@@ -116,7 +118,7 @@ const resourceConfigs: ResourceConfig[] = [
     columns: [
       { key: "appointment_id", label: "ID" },
       { key: "plate_number", label: "车牌" },
-      { key: "appointer_type", label: "预约方" },
+      { key: "appointer_display", label: "预约方" },
       { key: "purpose", label: "用途" },
       { key: "start_time", label: "开始" },
       { key: "status", label: "状态" }
@@ -142,11 +144,16 @@ const resourceConfigs: ResourceConfig[] = [
     accent: "text-berry",
     columns: [
       { key: "violation_id", label: "ID" },
-      { key: "vehicle_id", label: "车辆" },
-      { key: "rule_code", label: "规则" },
+      { key: "plate_number", label: "车牌号" },
+      { key: "violation_type", label: "违规类型" },
+      { key: "violation_level", label: "违规等级" },
       { key: "violation_time", label: "时间" },
       { key: "location", label: "地点" },
-      { key: "status", label: "状态" }
+      { key: "speed", label: "实测速度" },
+      { key: "speed_limit", label: "限速" },
+      { key: "source", label: "来源" },
+      { key: "status", label: "状态" },
+      { key: "remark", label: "备注" }
     ],
     fields: [
       { name: "vehicle_id", label: "车辆", type: "select", optionKey: "vehicles" },
@@ -169,10 +176,11 @@ const resourceConfigs: ResourceConfig[] = [
     accent: "text-amber",
     columns: [
       { key: "penalty_id", label: "ID" },
+      { key: "source_plate_number", label: "来源车牌" },
       { key: "trigger_type", label: "触发" },
-      { key: "penalty_type", label: "处罚" },
-      { key: "points_deducted", label: "扣分" },
+      { key: "penalty_description", label: "处罚" },
       { key: "start_date", label: "开始" },
+      { key: "end_date", label: "结束" },
       { key: "status", label: "状态" }
     ],
     fields: [
@@ -199,11 +207,11 @@ const resourceConfigs: ResourceConfig[] = [
     accent: "text-cyan",
     columns: [
       { key: "appeal_id", label: "ID" },
-      { key: "violation_id", label: "违规" },
-      { key: "applicant_id", label: "申请人" },
+      { key: "violation_remark", label: "违规" },
+      { key: "applicant_name", label: "申请人" },
       { key: "reason", label: "理由" },
       { key: "status", label: "状态" },
-      { key: "handled_at", label: "处理时间" }
+      { key: "handler_opinion", label: "处理意见" }
     ],
     fields: [
       { name: "violation_id", label: "违规ID", type: "number" },
@@ -222,11 +230,11 @@ const resourceConfigs: ResourceConfig[] = [
     accent: "text-pine",
     columns: [
       { key: "addition_id", label: "ID" },
-      { key: "vehicle_id", label: "车辆" },
-      { key: "applicant_id", label: "申请人" },
+      { key: "plate_number", label: "车辆" },
+      { key: "applicant_name", label: "申请人" },
       { key: "addition_points", label: "加分" },
       { key: "status", label: "状态" },
-      { key: "applied_at", label: "申请时间" }
+      { key: "approver_opinion", label: "审批意见" }
     ],
     fields: [
       { name: "period_id", label: "记分周期", type: "select", optionKey: "periods" },
@@ -246,10 +254,11 @@ const resourceConfigs: ResourceConfig[] = [
     accent: "text-cyan",
     columns: [
       { key: "period_id", label: "ID" },
-      { key: "vehicle_id", label: "车辆" },
+      { key: "plate_number", label: "车辆" },
       { key: "year", label: "年份" },
       { key: "deducted_points_total", label: "累计扣分" },
       { key: "added_points_total", label: "累计加分" },
+      { key: "has_danger_violation", label: "危险违规" },
       { key: "remaining_points", label: "剩余分" }
     ],
     fields: [
@@ -270,9 +279,10 @@ const resourceConfigs: ResourceConfig[] = [
     accent: "text-berry",
     columns: [
       { key: "blacklist_id", label: "ID" },
-      { key: "vehicle_id", label: "车辆" },
+      { key: "plate_number", label: "车辆" },
       { key: "blacklist_type", label: "类型" },
       { key: "reason", label: "原因" },
+      { key: "penalty_id", label: "处罚记录号" },
       { key: "end_date", label: "截止" },
       { key: "is_active", label: "有效" }
     ],
@@ -298,7 +308,7 @@ const resourceConfigs: ResourceConfig[] = [
       { key: "recipient", label: "接收方" },
       { key: "recipient_type", label: "对象" },
       { key: "send_status", label: "状态" },
-      { key: "sent_time", label: "发送时间" }
+      { key: "content", label: "内容" }
     ],
     fields: [
       { name: "vehicle_id", label: "车辆", type: "select", optionKey: "vehicles" },
@@ -348,6 +358,33 @@ const statLabels: Record<string, string> = {
 };
 
 const ownerStatKeys = ["vehicle_count", "normal_vehicle_count", "violation_count", "active_penalty_count", "pending_appointment_count", "pending_appeal_count"];
+
+const simpleTableColumnLabels: Record<string, string> = {
+  plate_number: "车牌号",
+  violation_type: "违规类型",
+  violation_level: "违规等级",
+  points_deducted: "扣分",
+  location: "地点",
+  status: "状态",
+  penalty_type: "处罚类型",
+  trigger_type: "触发类型",
+  start_date: "开始日期",
+  end_date: "结束日期",
+  query_id: "查询编号",
+  requester_user_id: "请求用户",
+  natural_language_question: "自然语言问题",
+  generated_sql: "生成 SQL",
+  execution_status: "执行状态",
+  rows_returned: "返回行数",
+  created_at: "创建时间"
+};
+
+function simpleTableColumnClass(column: string) {
+  if (column === "location") return "min-w-[180px] w-[32%]";
+  if (column.includes("date") || column.includes("time") || column === "created_at") return "min-w-[120px]";
+  if (column === "plate_number") return "min-w-[96px]";
+  return "min-w-[88px]";
+}
 
 function display(value: Row[string]) {
   if (value === null || value === undefined || value === "") return "—";
@@ -494,6 +531,8 @@ export default function Page() {
   const activeConfig = useMemo(() => visibleConfigs.find((config) => config.key === activeKey), [activeKey, visibleConfigs]);
   const canManage = isAdminUser(currentUser);
   const canCreate = canManage || (!canManage && ["appointments", "appeals", "points-additions"].includes(activeKey));
+  const showDashboardTools = activeKey === "dashboard";
+  const showAiDemo = canManage && (activeKey === "dashboard" || activeKey === "ai-query-logs");
 
   function showToast(title: string, description = "") {
     setToast({ open: true, title, description });
@@ -764,7 +803,7 @@ export default function Page() {
             </header>
 
             <div className="space-y-5 p-5">
-              <section className={`grid gap-4 ${canManage ? "xl:grid-cols-[1fr_420px]" : ""}`}>
+              {showDashboardTools && <section className={`grid gap-4 ${canManage ? "xl:grid-cols-[1fr_420px]" : ""}`}>
                 <div className="rounded-lg border border-line bg-white p-4 shadow-sm">
                   <div className="mb-4 flex items-center gap-2">
                     <Gauge className="text-pine" size={20} />
@@ -803,7 +842,7 @@ export default function Page() {
                     </div>
                   )}
                 </div>}
-              </section>
+              </section>}
 
               {activeKey === "dashboard" ? (
                 <section className="grid gap-4 xl:grid-cols-2">
@@ -817,7 +856,7 @@ export default function Page() {
                   </div>
                 </section>
               ) : (
-                activeConfig && (
+                activeConfig && activeConfig.key !== "ai-query-logs" && (
                   <section className="rounded-lg border border-line bg-white shadow-sm">
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
                       <div className="flex items-center gap-2">
@@ -855,7 +894,7 @@ export default function Page() {
                       </div>
                     </div>
                     <div className="overflow-x-auto">
-                      <table className="w-full min-w-[860px] border-collapse text-sm">
+                      <table className={`w-full border-collapse text-sm ${activeConfig.key === "violations" ? "min-w-[1280px]" : "min-w-[860px]"}`}>
                         <thead>
                           <tr className="border-b border-line bg-slate-50 text-left text-slate-600">
                             {activeConfig.columns.map((column) => (
@@ -922,7 +961,7 @@ export default function Page() {
                 )
               )}
 
-              {canManage && <section className="rounded-lg border border-line bg-white p-4 shadow-sm">
+              {showAiDemo && <section className="rounded-lg border border-line bg-white p-4 shadow-sm">
                 <div className="mb-4 flex items-center gap-2">
                   <Bot className="text-amber" size={20} />
                   <h3 className="text-base font-semibold">查询智能体审计演示</h3>
@@ -989,11 +1028,11 @@ export default function Page() {
 function SimpleTable({ rows, columns }: { rows: Row[]; columns: string[] }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[560px] border-collapse text-sm">
+      <table className="w-full min-w-[720px] border-collapse text-sm">
         <thead>
           <tr className="border-b border-line bg-slate-50 text-left text-slate-600">
             {columns.map((column) => (
-              <th key={column} className="px-3 py-2 font-medium">{column}</th>
+              <th key={column} className={`px-3 py-2 font-medium ${simpleTableColumnClass(column)}`}>{simpleTableColumnLabels[column] ?? column}</th>
             ))}
           </tr>
         </thead>
@@ -1006,8 +1045,8 @@ function SimpleTable({ rows, columns }: { rows: Row[]; columns: string[] }) {
             rows.map((row, index) => (
               <tr key={index} className="border-b border-line last:border-0">
                 {columns.map((column) => (
-                  <td key={column} className="max-w-64 px-3 py-2 align-top">
-                    <span className="line-clamp-2">{display(row[column])}</span>
+                  <td key={column} className={`px-3 py-2 align-top ${simpleTableColumnClass(column)}`}>
+                    <span className={column === "location" ? "line-clamp-3 break-words" : "line-clamp-2 break-words"}>{display(row[column])}</span>
                   </td>
                 ))}
               </tr>

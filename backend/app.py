@@ -173,6 +173,469 @@ def query_one(sql: str, params: list[Any] | None = None) -> dict[str, Any] | Non
     return rows[0] if rows else None
 
 
+def list_appointments(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), a.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.appointer_type) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), d.dept_name) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), r.name) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), h.address) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.purpose) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.status) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 7)
+    if not is_admin(user):
+        registrant_id = user["registrant_id"]
+        filters.append("""
+            (
+                a.vehicle_id IN (SELECT vehicle_id FROM dbo.t_vehicle WHERE registrant_id = ?)
+                OR a.appointer_person_id = ?
+            )
+        """)
+        params.extend([registrant_id, registrant_id])
+
+    where = combine_where(filters)
+    appointer_display = """
+        CASE
+            WHEN a.appointer_type = N'房屋'
+                THEN CONCAT(ISNULL(h.address, N'未指定房屋'), N'房屋业主')
+            WHEN a.appointer_type = N'个人'
+                THEN ISNULL(r.name, N'未指定个人')
+            WHEN a.appointer_type = N'单位'
+                THEN ISNULL(d.dept_name, N'未指定单位')
+            ELSE a.appointer_type
+        END
+    """
+    from_sql = f"""
+        FROM dbo.t_appointment AS a
+        LEFT JOIN dbo.t_department AS d ON d.department_id = a.appointer_dept_id
+        LEFT JOIN dbo.t_registrant AS r ON r.registrant_id = a.appointer_person_id
+        LEFT JOIN dbo.t_house AS h ON h.house_id = a.appointer_house_id
+        {where}
+    """
+    count_sql = f"SELECT COUNT(*) AS total {from_sql};"
+    data_sql = f"""
+        SELECT
+            a.appointment_id,
+            a.vehicle_id,
+            a.plate_number,
+            a.appointer_type,
+            a.appointer_dept_id,
+            d.dept_name AS appointer_dept_name,
+            a.appointer_person_id,
+            r.name AS appointer_person_name,
+            a.appointer_house_id,
+            h.address AS appointer_house_address,
+            {appointer_display} AS appointer_display,
+            a.purpose,
+            a.start_time,
+            a.end_time,
+            a.status,
+            a.approver_id,
+            a.approved_at,
+            a.created_at
+        {from_sql}
+        ORDER BY a.appointment_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_vehicles(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), v.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.vehicle_type) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), r.name) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.register_status) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.remark) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 5)
+    if not is_admin(user):
+        filters.append("v.registrant_id = ?")
+        params.append(user["registrant_id"])
+
+    where = combine_where(filters)
+    count_sql = f"""
+        SELECT COUNT(*) AS total
+        FROM dbo.t_vehicle AS v
+        LEFT JOIN dbo.t_registrant AS r ON r.registrant_id = v.registrant_id
+        {where};
+    """
+    data_sql = f"""
+        SELECT
+            v.vehicle_id,
+            v.plate_number,
+            v.vehicle_type,
+            v.registrant_id,
+            r.name AS registrant_name,
+            v.register_status,
+            v.register_date,
+            v.status_start_date,
+            v.status_end_date,
+            v.remark,
+            v.created_at,
+            v.updated_at
+        FROM dbo.t_vehicle AS v
+        LEFT JOIN dbo.t_registrant AS r ON r.registrant_id = v.registrant_id
+        {where}
+        ORDER BY v.vehicle_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_violations(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), v.rule_code) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), veh.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), r.violation_type) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), r.violation_level) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.location) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.source) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.status) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), v.remark) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 8)
+    if not is_admin(user):
+        filters.append("veh.registrant_id = ?")
+        params.append(user["registrant_id"])
+
+    where = combine_where(filters)
+    count_sql = f"""
+        SELECT COUNT(*) AS total
+        FROM dbo.t_violation AS v
+        JOIN dbo.t_vehicle AS veh ON veh.vehicle_id = v.vehicle_id
+        JOIN dbo.t_violation_rule AS r ON r.rule_code = v.rule_code
+        {where};
+    """
+    data_sql = f"""
+        SELECT
+            v.violation_id,
+            v.vehicle_id,
+            veh.plate_number,
+            v.appointment_id,
+            v.rule_code,
+            r.violation_type,
+            r.violation_level,
+            v.violation_time,
+            v.location,
+            v.speed,
+            v.speed_limit,
+            v.evidence_path,
+            v.source,
+            v.status,
+            v.remark,
+            v.created_at
+        FROM dbo.t_violation AS v
+        JOIN dbo.t_vehicle AS veh ON veh.vehicle_id = v.vehicle_id
+        JOIN dbo.t_violation_rule AS r ON r.rule_code = v.rule_code
+        {where}
+        ORDER BY v.violation_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_penalties(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), sv.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), p.trigger_type) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), p.penalty_type) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), p.status) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), d.dept_name) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), h.address) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 6)
+    if not is_admin(user):
+        registrant_id = user["registrant_id"]
+        filters.append("""
+            (
+                p.source_vehicle_id IN (SELECT vehicle_id FROM dbo.t_vehicle WHERE registrant_id = ?)
+                OR p.target_vehicle_id IN (SELECT vehicle_id FROM dbo.t_vehicle WHERE registrant_id = ?)
+                OR p.target_person_id = ?
+            )
+        """)
+        params.extend([registrant_id, registrant_id, registrant_id])
+
+    where = combine_where(filters)
+    penalty_description = """
+        CASE
+            WHEN p.penalty_type = N'扣分'
+                THEN CONCAT(N'扣', p.points_deducted, N'分')
+            WHEN p.penalty_type = N'暂停入校'
+                THEN CONCAT(N'扣', p.points_deducted, N'分并暂停入校', ISNULL(CONVERT(NVARCHAR(20), p.suspension_days), N'0'), N'天')
+            WHEN p.penalty_type = N'预约黑名单'
+                THEN CONCAT(N'扣', p.points_deducted, N'分并预约黑名单')
+            WHEN p.penalty_type = N'通报单位'
+                THEN CONCAT(N'通报单位[', ISNULL(d.dept_name, N'未指定单位'), N']')
+            WHEN p.penalty_type = N'取消房屋预约'
+                THEN CONCAT(N'取消房屋预约：', ISNULL(h.address, N'未指定房屋'), N' ', ISNULL(CONVERT(NVARCHAR(20), p.suspension_days), N'0'), N' 天')
+            ELSE p.penalty_type
+        END
+    """
+    from_sql = f"""
+        FROM dbo.t_penalty AS p
+        LEFT JOIN dbo.t_vehicle AS sv ON sv.vehicle_id = p.source_vehicle_id
+        LEFT JOIN dbo.t_department AS d ON d.department_id = p.target_dept_id
+        LEFT JOIN dbo.t_house AS h ON h.house_id = p.target_house_id
+        {where}
+    """
+    count_sql = f"SELECT COUNT(*) AS total {from_sql};"
+    data_sql = f"""
+        SELECT
+            p.penalty_id,
+            p.violation_id,
+            p.source_vehicle_id,
+            sv.plate_number AS source_plate_number,
+            p.period_id,
+            p.trigger_type,
+            p.penalty_type,
+            {penalty_description} AS penalty_description,
+            p.points_deducted,
+            p.suspension_days,
+            p.start_date,
+            p.end_date,
+            p.target_vehicle_id,
+            p.target_dept_id,
+            d.dept_name AS target_dept_name,
+            p.target_person_id,
+            p.target_house_id,
+            h.address AS target_house_address,
+            p.status,
+            p.created_at
+        {from_sql}
+        ORDER BY p.penalty_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_appeals(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), v.remark) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), r.name) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.reason) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.status) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.handler_opinion) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 5)
+    if not is_admin(user):
+        filters.append("a.applicant_id = ?")
+        params.append(user["registrant_id"])
+
+    where = combine_where(filters)
+    from_sql = f"""
+        FROM dbo.t_appeal AS a
+        LEFT JOIN dbo.t_violation AS v ON v.violation_id = a.violation_id
+        LEFT JOIN dbo.t_registrant AS r ON r.registrant_id = a.applicant_id
+        {where}
+    """
+    count_sql = f"SELECT COUNT(*) AS total {from_sql};"
+    data_sql = f"""
+        SELECT
+            a.appeal_id,
+            a.violation_id,
+            v.remark AS violation_remark,
+            a.applicant_id,
+            r.name AS applicant_name,
+            a.reason,
+            a.evidence_path,
+            a.status,
+            a.handler_id,
+            a.handler_opinion,
+            a.applied_at,
+            a.handled_at
+        {from_sql}
+        ORDER BY a.appeal_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_points_additions(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), v.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), r.name) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.status) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), a.approver_opinion) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 4)
+    if not is_admin(user):
+        registrant_id = user["registrant_id"]
+        filters.append("""
+            (
+                a.applicant_id = ?
+                OR a.vehicle_id IN (SELECT vehicle_id FROM dbo.t_vehicle WHERE registrant_id = ?)
+            )
+        """)
+        params.extend([registrant_id, registrant_id])
+
+    where = combine_where(filters)
+    from_sql = f"""
+        FROM dbo.t_points_addition_log AS a
+        LEFT JOIN dbo.t_vehicle AS v ON v.vehicle_id = a.vehicle_id
+        LEFT JOIN dbo.t_registrant AS r ON r.registrant_id = a.applicant_id
+        {where}
+    """
+    count_sql = f"SELECT COUNT(*) AS total {from_sql};"
+    data_sql = f"""
+        SELECT
+            a.addition_id,
+            a.period_id,
+            a.vehicle_id,
+            v.plate_number,
+            a.applicant_id,
+            r.name AS applicant_name,
+            a.addition_points,
+            a.proof_path,
+            a.status,
+            a.approver_id,
+            a.approver_opinion,
+            a.applied_at,
+            a.approved_at
+        {from_sql}
+        ORDER BY a.addition_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_scoring_periods(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), v.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), p.year) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), p.has_danger_violation) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), p.is_active) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 4)
+    if not is_admin(user):
+        filters.append("v.registrant_id = ?")
+        params.append(user["registrant_id"])
+
+    where = combine_where(filters)
+    from_sql = f"""
+        FROM dbo.t_scoring_period AS p
+        LEFT JOIN dbo.t_vehicle AS v ON v.vehicle_id = p.vehicle_id
+        {where}
+    """
+    count_sql = f"SELECT COUNT(*) AS total {from_sql};"
+    data_sql = f"""
+        SELECT
+            p.period_id,
+            p.vehicle_id,
+            v.plate_number,
+            p.year,
+            p.initial_points,
+            p.deducted_points_total,
+            p.added_points_total,
+            p.add_count,
+            p.remaining_points,
+            p.has_danger_violation,
+            p.is_active,
+            p.created_at
+        {from_sql}
+        ORDER BY p.period_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
+def list_blacklists(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    filters: list[str] = []
+    params: list[Any] = []
+    if search:
+        filters.append("""
+            (
+                CONVERT(NVARCHAR(MAX), v.plate_number) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), b.blacklist_type) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), b.reason) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), b.penalty_id) LIKE ?
+                OR CONVERT(NVARCHAR(MAX), b.is_active) LIKE ?
+            )
+        """)
+        params.extend([f"%{search}%"] * 5)
+    if not is_admin(user):
+        filters.append("v.registrant_id = ?")
+        params.append(user["registrant_id"])
+
+    where = combine_where(filters)
+    from_sql = f"""
+        FROM dbo.t_blacklist AS b
+        LEFT JOIN dbo.t_vehicle AS v ON v.vehicle_id = b.vehicle_id
+        {where}
+    """
+    count_sql = f"SELECT COUNT(*) AS total {from_sql};"
+    data_sql = f"""
+        SELECT
+            b.blacklist_id,
+            b.vehicle_id,
+            v.plate_number,
+            b.blacklist_type,
+            b.reason,
+            b.source_type,
+            b.penalty_id,
+            b.start_date,
+            b.end_date,
+            b.is_active,
+            b.created_at
+        {from_sql}
+        ORDER BY b.blacklist_id DESC
+        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY;
+    """
+    total = execute_query(count_sql, params)[0]["total"]
+    rows = execute_query(data_sql, [*params, offset, limit])
+    return ok({"items": rows, "total": total, "limit": limit, "offset": offset})
+
+
 def today_sql() -> str:
     return "CONVERT(date, SYSDATETIME())"
 
@@ -766,6 +1229,22 @@ def list_resource(resource_name: str):
     limit = min(max(int(request.args.get("limit", 50)), 1), 200)
     offset = max(int(request.args.get("offset", 0)), 0)
     search = request.args.get("search")
+    if resource_name == "appointments":
+        return list_appointments(user, search, offset, limit)
+    if resource_name == "vehicles":
+        return list_vehicles(user, search, offset, limit)
+    if resource_name == "violations":
+        return list_violations(user, search, offset, limit)
+    if resource_name == "penalties":
+        return list_penalties(user, search, offset, limit)
+    if resource_name == "appeals":
+        return list_appeals(user, search, offset, limit)
+    if resource_name == "points-additions":
+        return list_points_additions(user, search, offset, limit)
+    if resource_name == "scoring-periods":
+        return list_scoring_periods(user, search, offset, limit)
+    if resource_name == "blacklists":
+        return list_blacklists(user, search, offset, limit)
     where, params = build_where(resource, search)
     where = combine_where([where, scope_where])
     params = [*params, *scope_params]
