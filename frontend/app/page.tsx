@@ -4,13 +4,11 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Toast from "@radix-ui/react-toast";
 import {
   AlertTriangle,
-  Bell,
   Bot,
   Car,
   Check,
   ClipboardCheck,
   Database,
-  FilePenLine,
   Gauge,
   LayoutDashboard,
   ListFilter,
@@ -25,7 +23,7 @@ import {
   UserRound,
   X
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiSend } from "@/lib/api";
 
 type Row = Record<string, string | number | boolean | null>;
@@ -78,10 +76,31 @@ type CurrentUser = {
 };
 
 const adminRoles = new Set(["系统管理员", "保卫处管理员", "审核员"]);
-const ownerResourceKeys = new Set(["vehicles", "appointments", "violations", "penalties", "appeals", "points-additions", "scoring-periods"]);
+const ownerResourceKeys = new Set(["vehicles", "appointments", "violations", "penalties", "points-additions", "scoring-periods"]);
+const derivedResourceKeys = new Set(["penalties", "scoring-periods", "blacklists"]);
+const ownerCreatableResourceKeys = new Set(["appointments", "points-additions"]);
 
 function isAdminUser(user: CurrentUser | null) {
   return !!user && adminRoles.has(user.role);
+}
+
+const requiredFields: Record<string, Set<string>> = {
+  vehicles: new Set(["plate_number", "vehicle_type", "registrant_id", "register_status"]),
+  appointments: new Set(["vehicle_id", "appointer_type", "purpose", "start_time", "end_time", "status"]),
+  violations: new Set(["vehicle_id", "rule_code", "violation_time", "location", "source", "status"]),
+  penalties: new Set(["trigger_type", "penalty_type", "points_deducted", "status"]),
+  "points-additions": new Set(["period_id", "vehicle_id", "applicant_id", "addition_points", "status"]),
+  "scoring-periods": new Set(["vehicle_id", "year", "initial_points", "deducted_points_total", "added_points_total", "add_count", "has_danger_violation", "is_active"]),
+  blacklists: new Set(["vehicle_id", "blacklist_type", "reason", "source_type", "start_date", "is_active"]),
+  "ai-query-logs": new Set(["requester_user_id", "natural_language_question", "generated_sql", "is_readonly", "execution_status"])
+};
+
+function isRequiredField(resourceKey: string, fieldName: string) {
+  return requiredFields[resourceKey]?.has(fieldName) ?? false;
+}
+
+function RequiredMark() {
+  return <span className="ml-1 text-rose-600">*</span>;
 }
 
 const resourceConfigs: ResourceConfig[] = [
@@ -121,6 +140,7 @@ const resourceConfigs: ResourceConfig[] = [
       { key: "appointer_display", label: "预约方" },
       { key: "purpose", label: "用途" },
       { key: "start_time", label: "开始" },
+      { key: "end_time", label: "结束" },
       { key: "status", label: "状态" }
     ],
     fields: [
@@ -201,29 +221,6 @@ const resourceConfigs: ResourceConfig[] = [
     ]
   },
   {
-    key: "appeals",
-    title: "申诉审批",
-    icon: FilePenLine,
-    accent: "text-cyan",
-    columns: [
-      { key: "appeal_id", label: "ID" },
-      { key: "violation_remark", label: "违规" },
-      { key: "applicant_name", label: "申请人" },
-      { key: "reason", label: "理由" },
-      { key: "status", label: "状态" },
-      { key: "handler_opinion", label: "处理意见" }
-    ],
-    fields: [
-      { name: "violation_id", label: "违规ID", type: "number" },
-      { name: "applicant_id", label: "申请人", type: "select", optionKey: "registrants" },
-      { name: "reason", label: "申诉理由", type: "textarea" },
-      { name: "evidence_path", label: "附件路径" },
-      { name: "status", label: "状态", type: "select", options: [{ id: "待处理", label: "待处理" }, { id: "已通过", label: "已通过" }, { id: "已驳回", label: "已驳回" }, { id: "已撤回", label: "已撤回" }] },
-      { name: "handler_id", label: "处理人", type: "select", optionKey: "users" },
-      { name: "handler_opinion", label: "处理意见", type: "textarea" }
-    ]
-  },
-  {
     key: "points-additions",
     title: "加分申请",
     icon: Gauge,
@@ -295,31 +292,6 @@ const resourceConfigs: ResourceConfig[] = [
       { name: "start_date", label: "开始日期", type: "date" },
       { name: "end_date", label: "结束日期", type: "date" },
       { name: "is_active", label: "是否有效", type: "select", options: [{ id: 1, label: "有效" }, { id: 0, label: "无效" }] }
-    ]
-  },
-  {
-    key: "notifications",
-    title: "通知日志",
-    icon: Bell,
-    accent: "text-pine",
-    columns: [
-      { key: "notification_id", label: "ID" },
-      { key: "notification_type", label: "类型" },
-      { key: "recipient", label: "接收方" },
-      { key: "recipient_type", label: "对象" },
-      { key: "send_status", label: "状态" },
-      { key: "content", label: "内容" }
-    ],
-    fields: [
-      { name: "vehicle_id", label: "车辆", type: "select", optionKey: "vehicles" },
-      { name: "violation_id", label: "违规ID", type: "number" },
-      { name: "penalty_id", label: "处罚ID", type: "number" },
-      { name: "notification_type", label: "通知类型" },
-      { name: "recipient", label: "接收方" },
-      { name: "recipient_type", label: "接收方类型" },
-      { name: "content", label: "内容", type: "textarea" },
-      { name: "sent_time", label: "发送时间", type: "datetime-local" },
-      { name: "send_status", label: "状态", type: "select", options: [{ id: "待发送", label: "待发送" }, { id: "已发送", label: "已发送" }, { id: "发送失败", label: "发送失败" }] }
     ]
   },
   {
@@ -400,6 +372,24 @@ function inputValue(value: Row[string] | undefined, type?: Field["type"]) {
   return text;
 }
 
+function plateFromVehicleOptions(options: OptionsPayload, vehicleId: Row[string]) {
+  const option = (options.vehicles ?? []).find((item) => String(item.id) === String(vehicleId));
+  return option ? String(option.label).split(" / ")[0] : "";
+}
+
+function isBVehicleOption(option: OptionItem) {
+  const parts = String(option.label).split(" / ");
+  return parts[1]?.trim() === "B";
+}
+
+function optionsForDialog(config: ResourceConfig, options: OptionsPayload) {
+  if (config.key !== "appointments") return options;
+  return {
+    ...options,
+    vehicles: (options.vehicles ?? []).filter(isBVehicleOption)
+  };
+}
+
 function payloadFromForm(form: HTMLFormElement, fields: Field[]) {
   const data = new FormData(form);
   const payload: Record<string, string | number | null> = {};
@@ -407,6 +397,8 @@ function payloadFromForm(form: HTMLFormElement, fields: Field[]) {
     const value = String(data.get(field.name) ?? "").trim();
     if (value === "") {
       payload[field.name] = null;
+    } else if (field.type === "datetime-local") {
+      payload[field.name] = value.length === 16 ? `${value.replace("T", " ")}:00` : value.replace("T", " ");
     } else if (field.type === "number" || field.optionKey || field.name.endsWith("_id") || field.name === "is_active" || field.name === "is_readonly") {
       payload[field.name] = Number(value);
     } else {
@@ -428,17 +420,29 @@ function Badge({ value }: { value: Row[string] }) {
   return <span className={`inline-flex min-h-7 items-center rounded-md border px-2 text-sm ${className}`}>{text}</span>;
 }
 
-function FieldInput({ field, row, options }: { field: Field; row?: Row | null; options: OptionsPayload }) {
+function FieldInput({
+  field,
+  row,
+  options,
+  required = false,
+  onValueChange
+}: {
+  field: Field;
+  row?: Row | null;
+  options: OptionsPayload;
+  required?: boolean;
+  onValueChange?: (value: string) => void;
+}) {
   const fieldOptions = field.options ?? (field.optionKey ? options[field.optionKey] : undefined) ?? [];
   const base = "min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none transition focus:border-cyan focus:ring-4 focus:ring-cyan/10";
   const value = inputValue(row?.[field.name], field.type);
 
   if (field.type === "textarea") {
-    return <textarea name={field.name} defaultValue={value} placeholder={field.placeholder} className={`${base} min-h-24 py-2`} />;
+    return <textarea name={field.name} defaultValue={value} placeholder={field.placeholder} required={required} className={`${base} min-h-24 py-2`} />;
   }
   if (field.type === "select") {
     return (
-      <select name={field.name} defaultValue={value} className={base}>
+      <select name={field.name} defaultValue={value} required={required} onChange={(event) => onValueChange?.(event.target.value)} className={base}>
         <option value="">不填写</option>
         {fieldOptions.map((option) => (
           <option key={String(option.id)} value={String(option.id)}>
@@ -448,7 +452,7 @@ function FieldInput({ field, row, options }: { field: Field; row?: Row | null; o
       </select>
     );
   }
-  return <input name={field.name} type={field.type ?? "text"} defaultValue={value} placeholder={field.placeholder} className={base} />;
+  return <input name={field.name} type={field.type ?? "text"} defaultValue={value} placeholder={field.placeholder} required={required} className={base} />;
 }
 
 function RecordDialog({
@@ -457,7 +461,9 @@ function RecordDialog({
   options,
   open,
   onOpenChange,
-  onSubmit
+  onSubmit,
+  onCreateRegistrant,
+  canManage
 }: {
   config: ResourceConfig;
   row: Row | null;
@@ -465,11 +471,111 @@ function RecordDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (payload: Record<string, string | number | null>) => Promise<void>;
+  onCreateRegistrant?: (payload: Record<string, string | number | null>) => Promise<string | number>;
+  canManage: boolean;
 }) {
   const title = row ? `编辑${config.title}` : `新增${config.title}`;
+  const dialogOptions = optionsForDialog(config, options);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const [registrantDraft, setRegistrantDraft] = useState({
+    name: "",
+    identity_type: "教职工",
+    phone: "",
+    account_username: "",
+    id_number: "",
+    department_id: "",
+    house_id: ""
+  });
+  const [creatingRegistrant, setCreatingRegistrant] = useState(false);
+  const [createdRegistrantId, setCreatedRegistrantId] = useState<string | number | null>(null);
+  const [appointmentType, setAppointmentType] = useState("");
+  const showRegistrantCreator = config.key === "vehicles" && !row && !!onCreateRegistrant;
+
+  useEffect(() => {
+    if (!open) {
+      setRegistrantDraft({
+        name: "",
+        identity_type: "教职工",
+        phone: "",
+        account_username: "",
+        id_number: "",
+        department_id: "",
+        house_id: ""
+      });
+      setCreatedRegistrantId(null);
+      setCreatingRegistrant(false);
+      setAppointmentType("");
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || config.key !== "appointments") return;
+    setAppointmentType(inputValue(row?.appointer_type) || "个人");
+  }, [open, config.key, row]);
+
+  useEffect(() => {
+    if (!createdRegistrantId) return;
+    const exists = (dialogOptions.registrants ?? []).some((option) => String(option.id) === String(createdRegistrantId));
+    if (!exists) return;
+    const registrantSelect = formRef.current?.elements.namedItem("registrant_id") as HTMLSelectElement | null;
+    if (registrantSelect) registrantSelect.value = String(createdRegistrantId);
+  }, [createdRegistrantId, dialogOptions.registrants]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await onSubmit(payloadFromForm(event.currentTarget, config.fields));
+  }
+  async function createRegistrant() {
+    if (!onCreateRegistrant) return;
+    const name = registrantDraft.name.trim();
+    const phone = registrantDraft.phone.trim();
+    if (!name || !registrantDraft.identity_type || !phone) {
+      return;
+    }
+    setCreatingRegistrant(true);
+    try {
+      const id = await onCreateRegistrant({
+        name,
+        identity_type: registrantDraft.identity_type,
+        phone,
+        account_username: registrantDraft.account_username.trim() || phone,
+        id_number: registrantDraft.id_number.trim() || null,
+        department_id: registrantDraft.department_id ? Number(registrantDraft.department_id) : null,
+        house_id: registrantDraft.house_id ? Number(registrantDraft.house_id) : null,
+        appointment_status: "正常",
+        appointment_suspend_until: null
+      });
+      setCreatedRegistrantId(id);
+    } finally {
+      setCreatingRegistrant(false);
+    }
+  }
+  function setRegistrantDraftValue(field: keyof typeof registrantDraft, value: string) {
+    setRegistrantDraft((current) => ({ ...current, [field]: value }));
+  }
+  function shouldShowField(field: Field) {
+    if (config.key === "points-additions") {
+      if (canManage) return !!row && ["status", "approver_id", "approver_opinion"].includes(field.name);
+      return !row && ["vehicle_id", "addition_points", "proof_path"].includes(field.name);
+    }
+    if (config.key !== "appointments") return true;
+    if (field.name === "plate_number") return false;
+    if (field.name === "appointer_dept_id") return appointmentType === "单位";
+    if (field.name === "appointer_person_id") return appointmentType === "个人";
+    if (field.name === "appointer_house_id") return appointmentType === "房屋";
+    return true;
+  }
+  function fieldIsRequired(field: Field) {
+    if (config.key === "points-additions") {
+      if (canManage) return field.name === "status";
+      return ["vehicle_id", "addition_points"].includes(field.name);
+    }
+    if (config.key === "appointments") {
+      if (field.name === "appointer_dept_id") return appointmentType === "单位";
+      if (field.name === "appointer_person_id") return appointmentType === "个人";
+      if (field.name === "appointer_house_id") return appointmentType === "房屋";
+    }
+    return isRequiredField(config.key, field.name);
   }
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -482,15 +588,83 @@ function RecordDialog({
               <X size={18} />
             </Dialog.Close>
           </div>
-          <form onSubmit={handleSubmit} className="max-h-[calc(88vh-74px)] overflow-y-auto p-5">
+          <form ref={formRef} onSubmit={handleSubmit} className="max-h-[calc(88vh-74px)] overflow-y-auto p-5">
             <div className="grid gap-4 md:grid-cols-2">
-              {config.fields.map((field) => (
-                <label key={field.name} className={field.type === "textarea" ? "md:col-span-2" : ""}>
-                  <span className="mb-1.5 block text-sm font-medium text-slate-700">{field.label}</span>
-                  <FieldInput field={field} row={row} options={options} />
-                </label>
-              ))}
+              {config.fields.filter(shouldShowField).map((field) => {
+                const required = fieldIsRequired(field);
+                const fieldRow = config.key === "appointments" && !row && field.name === "appointer_type"
+                  ? ({ appointer_type: "个人" } as Row)
+                  : row;
+                return (
+                  <label key={field.name} className={field.type === "textarea" ? "md:col-span-2" : ""}>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">
+                      {field.label}
+                      {required && <RequiredMark />}
+                    </span>
+                    <FieldInput
+                      field={field}
+                      row={fieldRow}
+                      options={dialogOptions}
+                      required={required}
+                      onValueChange={field.name === "appointer_type" ? setAppointmentType : undefined}
+                    />
+                  </label>
+                );
+              })}
             </div>
+            {showRegistrantCreator && (
+              <section className="mt-5 rounded-lg border border-line bg-slate-50 p-4">
+                <div className="mb-4 flex items-center gap-2">
+                  <UserRound className="text-cyan" size={18} />
+                  <h4 className="text-sm font-semibold text-slate-800">新增登记人</h4>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">姓名<RequiredMark /></span>
+                    <input value={registrantDraft.name} onChange={(event) => setRegistrantDraftValue("name", event.target.value)} className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">身份类型<RequiredMark /></span>
+                    <select value={registrantDraft.identity_type} onChange={(event) => setRegistrantDraftValue("identity_type", event.target.value)} className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10">
+                      {["教职工", "学生", "购租户", "外来人员", "其他"].map((type) => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">手机号<RequiredMark /></span>
+                    <input value={registrantDraft.phone} onChange={(event) => setRegistrantDraftValue("phone", event.target.value)} className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">登录账号</span>
+                    <input value={registrantDraft.account_username} onChange={(event) => setRegistrantDraftValue("account_username", event.target.value)} placeholder="不填则使用手机号" className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">证件号</span>
+                    <input value={registrantDraft.id_number} onChange={(event) => setRegistrantDraftValue("id_number", event.target.value)} className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">所属单位</span>
+                    <select value={registrantDraft.department_id} onChange={(event) => setRegistrantDraftValue("department_id", event.target.value)} className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10">
+                      <option value="">不填写</option>
+                      {(dialogOptions.departments ?? []).map((option) => <option key={String(option.id)} value={String(option.id)}>{option.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">关联房屋</span>
+                    <select value={registrantDraft.house_id} onChange={(event) => setRegistrantDraftValue("house_id", event.target.value)} className="min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10">
+                      <option value="">不填写</option>
+                      {(dialogOptions.houses ?? []).map((option) => <option key={String(option.id)} value={String(option.id)}>{option.label}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm text-slate-500">提交后会写入登记人表，并自动选中新登记人。</p>
+                  <button type="button" onClick={createRegistrant} disabled={creatingRegistrant || !registrantDraft.name.trim() || !registrantDraft.phone.trim()} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">
+                    {creatingRegistrant ? <Loader2 className="animate-spin" size={16} /> : <Plus size={16} />}
+                    新增登记人
+                  </button>
+                </div>
+              </section>
+            )}
             <div className="mt-5 flex justify-end gap-3 border-t border-line pt-4">
               <Dialog.Close className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-4 text-sm hover:bg-slate-50">
                 <X size={16} /> 取消
@@ -506,6 +680,163 @@ function RecordDialog({
   );
 }
 
+function RegistrantEditorDialog({
+  open,
+  options,
+  onOpenChange,
+  onSaved
+}: {
+  open: boolean;
+  options: OptionsPayload;
+  onOpenChange: (open: boolean) => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState("");
+  const [registrant, setRegistrant] = useState<Row | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const base = "min-h-10 w-full rounded-md border border-line bg-white px-3 text-sm outline-none transition focus:border-cyan focus:ring-4 focus:ring-cyan/10";
+
+  useEffect(() => {
+    if (!open) {
+      setSelectedId("");
+      setRegistrant(null);
+      setLoading(false);
+      setSaving(false);
+    }
+  }, [open]);
+
+  async function loadRegistrant(registrantId: string) {
+    setSelectedId(registrantId);
+    if (!registrantId) {
+      setRegistrant(null);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await apiGet<Row>(`/registrants/${registrantId}`);
+      setRegistrant(data);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedId || !registrant) return;
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      name: String(form.get("name") ?? "").trim(),
+      identity_type: String(form.get("identity_type") ?? "").trim(),
+      phone: String(form.get("phone") ?? "").trim(),
+      id_number: String(form.get("id_number") ?? "").trim() || null,
+      department_id: form.get("department_id") ? Number(form.get("department_id")) : null,
+      house_id: form.get("house_id") ? Number(form.get("house_id")) : null,
+      appointment_status: String(form.get("appointment_status") ?? "").trim(),
+      appointment_suspend_until: String(form.get("appointment_suspend_until") ?? "").trim() || null
+    };
+    setSaving(true);
+    try {
+      await apiSend(`/registrants/${selectedId}`, "PUT", payload);
+      await onSaved();
+      onOpenChange(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-ink/35" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[88vh] w-[min(760px,calc(100vw-32px))] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg border border-line bg-white shadow-soft">
+          <div className="flex items-center justify-between border-b border-line px-5 py-4">
+            <Dialog.Title className="text-lg font-semibold">修改登记人信息</Dialog.Title>
+            <Dialog.Close className="rounded-md p-2 text-slate-500 hover:bg-slate-100" aria-label="关闭">
+              <X size={18} />
+            </Dialog.Close>
+          </div>
+          <div className="max-h-[calc(88vh-74px)] overflow-y-auto p-5">
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium text-slate-700">选择登记人<RequiredMark /></span>
+              <select value={selectedId} onChange={(event) => void loadRegistrant(event.target.value)} className={base}>
+                <option value="">请选择登记人</option>
+                {(options.registrants ?? []).map((option) => (
+                  <option key={String(option.id)} value={String(option.id)}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+
+            {loading && (
+              <div className="mt-5 rounded-lg border border-line bg-slate-50 p-6 text-center text-sm text-slate-500">
+                <Loader2 className="mx-auto mb-2 animate-spin" size={22} /> 正在加载登记人信息
+              </div>
+            )}
+
+            {registrant && !loading && (
+              <form onSubmit={handleSubmit} className="mt-5">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">姓名<RequiredMark /></span>
+                    <input name="name" required defaultValue={inputValue(registrant.name)} className={base} />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">身份类型<RequiredMark /></span>
+                    <select name="identity_type" required defaultValue={inputValue(registrant.identity_type)} className={base}>
+                      {["教职工", "学生", "购租户", "外来人员", "其他"].map((type) => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">手机号<RequiredMark /></span>
+                    <input name="phone" required defaultValue={inputValue(registrant.phone)} className={base} />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">证件号</span>
+                    <input name="id_number" defaultValue={inputValue(registrant.id_number)} className={base} />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">所属单位</span>
+                    <select name="department_id" defaultValue={inputValue(registrant.department_id)} className={base}>
+                      <option value="">不填写</option>
+                      {(options.departments ?? []).map((option) => <option key={String(option.id)} value={String(option.id)}>{option.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">关联房屋</span>
+                    <select name="house_id" defaultValue={inputValue(registrant.house_id)} className={base}>
+                      <option value="">不填写</option>
+                      {(options.houses ?? []).map((option) => <option key={String(option.id)} value={String(option.id)}>{option.label}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">预约权限<RequiredMark /></span>
+                    <select name="appointment_status" required defaultValue={inputValue(registrant.appointment_status)} className={base}>
+                      {["正常", "暂停", "取消"].map((status) => <option key={status} value={status}>{status}</option>)}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-sm font-medium text-slate-700">暂停截止</span>
+                    <input name="appointment_suspend_until" type="date" defaultValue={inputValue(registrant.appointment_suspend_until, "date")} className={base} />
+                  </label>
+                </div>
+                <div className="mt-5 flex justify-end gap-3 border-t border-line pt-4">
+                  <Dialog.Close className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-4 text-sm hover:bg-slate-50">
+                    <X size={16} /> 取消
+                  </Dialog.Close>
+                  <button disabled={saving} className="inline-flex min-h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60">
+                    {saving ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}
+                    保存
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export default function Page() {
   const [activeKey, setActiveKey] = useState("dashboard");
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -515,6 +846,7 @@ export default function Page() {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [registrantDialogOpen, setRegistrantDialogOpen] = useState(false);
   const [editingRow, setEditingRow] = useState<Row | null>(null);
   const [deleteRow, setDeleteRow] = useState<Row | null>(null);
   const [toast, setToast] = useState({ open: false, title: "", description: "" });
@@ -530,7 +862,10 @@ export default function Page() {
   }, [currentUser]);
   const activeConfig = useMemo(() => visibleConfigs.find((config) => config.key === activeKey), [activeKey, visibleConfigs]);
   const canManage = isAdminUser(currentUser);
-  const canCreate = canManage || (!canManage && ["appointments", "appeals", "points-additions"].includes(activeKey));
+  const canCreate = !!activeConfig && !derivedResourceKeys.has(activeConfig.key) && (
+    (canManage && !["appointments", "points-additions"].includes(activeConfig.key)) ||
+    (!canManage && ownerCreatableResourceKeys.has(activeConfig.key))
+  );
   const showDashboardTools = activeKey === "dashboard";
   const showAiDemo = canManage && (activeKey === "dashboard" || activeKey === "ai-query-logs");
 
@@ -541,6 +876,12 @@ export default function Page() {
   async function refreshDashboard() {
     const data = await apiGet<DashboardPayload>("/dashboard");
     setDashboard(data);
+  }
+
+  async function refreshOptions() {
+    const opts = await apiGet<OptionsPayload>("/options");
+    setOptions(opts);
+    return opts;
   }
 
   async function refreshTable(config = activeConfig) {
@@ -564,8 +905,7 @@ export default function Page() {
     try {
       const healthData = await apiGet<{ database: string; server_time: string }>("/health");
       setHealth(`${healthData.database} 已连接`);
-      const opts = await apiGet<OptionsPayload>("/options");
-      setOptions(opts);
+      await refreshOptions();
       await refreshDashboard();
     } catch (error) {
       setHealth("数据库未连接");
@@ -621,6 +961,19 @@ export default function Page() {
       return;
     }
     if (!activeConfig) return;
+    if (activeConfig.key === "appointments") {
+      const plateNumber = plateFromVehicleOptions(options, payload.vehicle_id) || inputValue(editingRow?.plate_number);
+      const vehicleOption = (options.vehicles ?? []).find((option) => String(option.id) === String(payload.vehicle_id));
+      if (vehicleOption && !isBVehicleOption(vehicleOption)) {
+        showToast("请选择 B 类车辆", "只有 B 类车辆需要提交预约入校");
+        return;
+      }
+      if (!plateNumber) {
+        showToast("请选择车辆", "预约入校需要先选择车辆，系统会自动带出车牌号");
+        return;
+      }
+      payload.plate_number = plateNumber;
+    }
     if (editingRow) {
       await apiSend(`/${activeConfig.key}/${editingRow[activeConfig.columns[0].key]}`, "PUT", payload);
       showToast("更新成功", `${activeConfig.title}记录已保存`);
@@ -634,8 +987,21 @@ export default function Page() {
     await refreshDashboard();
   }
 
+  async function createRegistrantForVehicle(payload: Record<string, string | number | null>) {
+    const data = await apiSend<{ id: string | number; username?: string; default_password?: string }>("/registrants", "POST", payload);
+    await refreshOptions();
+    showToast("登记人已新增", `账号 ${data.username ?? payload.account_username ?? payload.phone} 已创建，默认密码 ${data.default_password ?? "123456"}`);
+    return data.id;
+  }
+
+  async function afterRegistrantSaved() {
+    await refreshOptions();
+    await refreshTable();
+    showToast("登记人已更新", "车辆档案中的登记人信息已刷新");
+  }
+
   async function confirmDelete() {
-    if (!canManage) {
+    if (!canManage && activeConfig?.key !== "points-additions") {
       showToast("权限不足", "普通车主仅支持查看自己的相关信息");
       return;
     }
@@ -689,14 +1055,6 @@ export default function Page() {
     await refreshDashboard();
   }
 
-  async function annualReset() {
-    const year = new Date().getFullYear();
-    const data = await apiSend<{ year: number; created_periods: number }>("/scoring-periods/annual-reset", "POST", { year });
-    showToast("年度重置完成", `${data.year} 年新增 ${data.created_periods} 个记分周期`);
-    await refreshDashboard();
-    if (activeConfig) await refreshTable();
-  }
-
   if (!currentUser) {
     return (
       <Toast.Provider swipeDirection="right">
@@ -713,12 +1071,12 @@ export default function Page() {
             </div>
             <form onSubmit={handleLogin} className="space-y-4">
               <label className="block">
-                <span className="mb-1.5 block text-sm font-medium text-slate-700">用户名</span>
-                <input name="username" placeholder="admin 或 zhangming" className="min-h-11 w-full rounded-md border border-line px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
+                <span className="mb-1.5 block text-sm font-medium text-slate-700">用户名<RequiredMark /></span>
+                <input name="username" required placeholder="admin 或 zhangming" className="min-h-11 w-full rounded-md border border-line px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
               </label>
               <label className="block">
-                <span className="mb-1.5 block text-sm font-medium text-slate-700">密码</span>
-                <input name="password" type="password" placeholder="演示密码 123456" className="min-h-11 w-full rounded-md border border-line px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
+                <span className="mb-1.5 block text-sm font-medium text-slate-700">密码<RequiredMark /></span>
+                <input name="password" type="password" required placeholder="演示密码 123456" className="min-h-11 w-full rounded-md border border-line px-3 text-sm outline-none focus:border-cyan focus:ring-4 focus:ring-cyan/10" />
               </label>
               <button className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-medium text-white hover:bg-slate-700">
                 <UserRound size={17} /> 登录
@@ -790,11 +1148,6 @@ export default function Page() {
                   >
                     <RefreshCcw size={16} /> 刷新
                   </button>
-                  {canManage && (
-                    <button onClick={annualReset} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm hover:bg-slate-50">
-                      <Gauge size={16} /> 年度重置
-                    </button>
-                  )}
                   <button onClick={logout} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm hover:bg-slate-50">
                     <LogOut size={16} /> 退出
                   </button>
@@ -882,6 +1235,11 @@ export default function Page() {
                         <button onClick={() => refreshTable()} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm hover:bg-slate-50">
                           <Search size={16} /> 查询
                         </button>
+                        {canManage && activeConfig.key === "vehicles" && (
+                          <button onClick={() => setRegistrantDialogOpen(true)} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-line px-3 text-sm hover:bg-slate-50">
+                            <UserRound size={16} /> 修改登记人信息
+                          </button>
+                        )}
                         {canCreate && <button
                           onClick={() => {
                             setEditingRow(null);
@@ -933,7 +1291,7 @@ export default function Page() {
                                     >
                                       <SquarePen size={15} /> 编辑
                                     </button>}
-                                    {canManage && <button
+                                    {(canManage || activeConfig.key === "points-additions") && <button
                                       onClick={() => setDeleteRow(row)}
                                       className="inline-flex min-h-9 items-center gap-1 rounded-md border border-rose-200 px-3 text-sm text-rose-700 hover:bg-rose-50"
                                     >
@@ -994,6 +1352,17 @@ export default function Page() {
             open={dialogOpen}
             onOpenChange={setDialogOpen}
             onSubmit={saveRecord}
+            onCreateRegistrant={canManage ? createRegistrantForVehicle : undefined}
+            canManage={canManage}
+          />
+        )}
+
+        {canManage && activeConfig?.key === "vehicles" && (
+          <RegistrantEditorDialog
+            open={registrantDialogOpen}
+            options={options}
+            onOpenChange={setRegistrantDialogOpen}
+            onSaved={afterRegistrantSaved}
           />
         )}
 

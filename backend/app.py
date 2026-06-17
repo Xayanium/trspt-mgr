@@ -105,6 +105,19 @@ def clean_payload(payload: dict[str, Any], allowed: tuple[str, ...]) -> tuple[li
     return columns, values
 
 
+DATETIME_FIELDS = {"start_time", "end_time", "violation_time", "sent_time", "approved_at", "reviewed_at", "handled_at", "approved_at"}
+
+
+def normalize_datetime_payload(payload: dict[str, Any]) -> None:
+    for field in DATETIME_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, str) and "T" in value:
+            normalized = value.replace("T", " ")
+            if len(normalized) == 16:
+                normalized = f"{normalized}:00"
+            payload[field] = normalized
+
+
 def build_where(resource: Resource, search: str | None) -> tuple[str, list[Any]]:
     if not search:
         return "", []
@@ -171,6 +184,33 @@ def resource_access(resource_name: str, user: dict[str, Any]) -> tuple[bool, tup
 def query_one(sql: str, params: list[Any] | None = None) -> dict[str, Any] | None:
     rows = execute_query(sql, params or [])
     return rows[0] if rows else None
+
+
+def owner_username_for_registrant(payload: dict[str, Any]) -> str:
+    return str(payload.get("account_username") or payload.get("phone") or "").strip()
+
+
+def create_owner_user_for_registrant(payload: dict[str, Any], registrant_id: Any) -> str:
+    username = owner_username_for_registrant(payload)
+    if not username:
+        raise ValueError("请提供登记人手机号或登录账号")
+    if query_one("SELECT user_id FROM dbo.t_user WHERE username = ?;", [username]):
+        raise ValueError("登录账号已存在，请更换账号")
+    insert_and_return_id(
+        "t_user",
+        ["username", "password_hash", "real_name", "role", "phone", "department_id", "registrant_id"],
+        [
+            username,
+            "FAKE_HASH_FOR_DEMO_ONLY",
+            payload.get("name"),
+            "车主",
+            payload.get("phone"),
+            payload.get("department_id"),
+            registrant_id,
+        ],
+        "user_id",
+    )
+    return username
 
 
 def list_appointments(user: dict[str, Any], search: str | None, offset: int, limit: int):
@@ -1049,6 +1089,65 @@ def restriction_reason_for_appointment(appointment_id: Any) -> str | None:
     return None
 
 
+def apply_points_addition_review(addition_id: Any, status: str, opinion: str | None, approver_id: Any) -> tuple[dict[str, Any] | None, str | None]:
+    if status not in {"待审批", "已通过", "已驳回", "已撤回"}:
+        return None, "学习申请状态只能是待审批、已通过、已驳回或已撤回"
+    addition = query_one(
+        """
+        SELECT a.*, p.deducted_points_total, p.add_count, v.vehicle_type, v.register_status, v.status_end_date
+        FROM dbo.t_points_addition_log AS a
+        JOIN dbo.t_scoring_period AS p ON p.period_id = a.period_id
+        JOIN dbo.t_vehicle AS v ON v.vehicle_id = a.vehicle_id
+        WHERE a.addition_id = ?;
+        """,
+        [addition_id],
+    )
+    if not addition:
+        return None, "学习申请不存在"
+
+    old_status = addition["status"]
+    if old_status != "待审批" and status != old_status:
+        return None, "该学习申请已经处理，不能变更审批状态"
+
+    if status == "已通过" and old_status != "已通过":
+        if addition["vehicle_type"] != "A":
+            return None, "仅 A 类车辆可通过学习恢复权限"
+        if int(addition["deducted_points_total"]) not in (12, 24):
+            return None, "只有累计扣分为 12 或 24 分时才能通过学习申请"
+        if int(addition["add_count"]) >= 2:
+            return None, "本年度学习恢复次数已达上限"
+        execute_non_query(
+            """
+            UPDATE dbo.t_scoring_period
+            SET added_points_total = added_points_total + ?, add_count = add_count + 1
+            WHERE period_id = ?;
+            """,
+            [addition["addition_points"], addition["period_id"]],
+        )
+        if addition["register_status"] == "暂停":
+            execute_non_query(
+                """
+                UPDATE dbo.t_vehicle
+                SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
+                WHERE vehicle_id = ? AND register_status = N'暂停';
+                """,
+                [addition["vehicle_id"]],
+            )
+
+    execute_non_query(
+        """
+        UPDATE dbo.t_points_addition_log
+        SET status = ?,
+            approver_id = ?,
+            approver_opinion = ?,
+            approved_at = CASE WHEN ? IN (N'已通过', N'已驳回') THEN SYSDATETIME() ELSE approved_at END
+        WHERE addition_id = ?;
+        """,
+        [status, approver_id, opinion, status, addition_id],
+    )
+    return {"id": addition_id}, None
+
+
 @app.get("/api/health")
 def health():
     try:
@@ -1289,13 +1388,27 @@ def create_resource(resource_name: str):
         return fail("当前用户无权新增该资源", 403)
     resource = get_resource(resource_name)
     payload = request.get_json(force=True) or {}
+    normalize_datetime_payload(payload)
+
+    if is_admin(user) and resource_name == "appointments":
+        return fail("预约入校应由车主自行提交，管理员仅支持查询和修改预约记录", 403)
+    if is_admin(user) and resource_name == "points-additions":
+        return fail("加分申请应由车主自行提交，管理员仅支持审批和管理申请记录", 403)
+    if is_admin(user) and resource_name == "registrants":
+        account_username = owner_username_for_registrant(payload)
+        if not account_username:
+            return fail("新增登记人时需要提供手机号或登录账号")
+        if query_one("SELECT user_id FROM dbo.t_user WHERE username = ?;", [account_username]):
+            return fail("登录账号已存在，请更换账号")
 
     if is_owner(user):
         registrant_id = user["registrant_id"]
         if resource_name == "appointments":
-            vehicle = query_one("SELECT vehicle_id, plate_number FROM dbo.t_vehicle WHERE vehicle_id = ? AND registrant_id = ?;", [payload.get("vehicle_id"), registrant_id])
+            vehicle = query_one("SELECT vehicle_id, plate_number, vehicle_type FROM dbo.t_vehicle WHERE vehicle_id = ? AND registrant_id = ?;", [payload.get("vehicle_id"), registrant_id])
             if not vehicle:
                 return fail("只能为本人车辆提交预约")
+            if vehicle["vehicle_type"] != "B":
+                return fail("只有 B 类车辆需要提交预约入校")
             payload["plate_number"] = vehicle["plate_number"]
             payload["appointer_type"] = "个人"
             payload["appointer_person_id"] = registrant_id
@@ -1354,9 +1467,19 @@ def create_resource(resource_name: str):
     if not columns:
         return fail("没有可写入的字段")
     record_id = insert_and_return_id(resource.table, columns, values, resource.pk)
+    account_username = None
+    if resource_name == "registrants":
+        try:
+            account_username = create_owner_user_for_registrant(payload, record_id)
+        except ValueError as error:
+            return fail(str(error))
     if resource_name == "violations":
         process_confirmed_violation(record_id)
-    return ok({"id": record_id}, f"{resource.title}已新增", 201)
+    data = {"id": record_id}
+    if account_username:
+        data["username"] = account_username
+        data["default_password"] = "123456"
+    return ok(data, f"{resource.title}已新增", 201)
 
 
 @app.put("/api/<resource_name>/<record_id>")
@@ -1366,6 +1489,19 @@ def update_resource(resource_name: str, record_id: str):
         return error
     resource = get_resource(resource_name)
     payload = request.get_json(force=True) or {}
+    normalize_datetime_payload(payload)
+    if resource_name == "points-additions":
+        allowed = {"status", "approver_id", "approver_opinion"}
+        payload = {key: value for key, value in payload.items() if key in allowed}
+        status = payload.get("status")
+        if not status:
+            return fail("请提供审批状态")
+        approver_id = payload.get("approver_id") or user["user_id"]
+        result, error_message = apply_points_addition_review(record_id, status, payload.get("approver_opinion"), approver_id)
+        if error_message:
+            status_code = 404 if error_message == "学习申请不存在" else 400
+            return fail(error_message, status_code)
+        return ok(result, "学习申请审批结果已保存")
     columns, values = clean_payload(payload, resource.writable)
     if not columns:
         return fail("没有可更新的字段")
@@ -1381,9 +1517,20 @@ def update_resource(resource_name: str, record_id: str):
 
 @app.delete("/api/<resource_name>/<record_id>")
 def delete_resource(resource_name: str, record_id: str):
-    user, error = require_admin()
+    user, error = require_user()
     if error:
         return error
+    if not is_admin(user):
+        if not (is_owner(user) and resource_name == "points-additions"):
+            return fail("当前用户无权删除该资源", 403)
+        existing = query_one(
+            "SELECT addition_id, status FROM dbo.t_points_addition_log WHERE addition_id = ? AND applicant_id = ?;",
+            [record_id, user["registrant_id"]],
+        )
+        if not existing:
+            return fail("记录不存在", 404)
+        if existing["status"] == "已通过":
+            return fail("已通过的加分申请不能由车主删除", 400)
     resource = get_resource(resource_name)
     rowcount = execute_non_query(f"DELETE FROM dbo.{resource.table} WHERE [{resource.pk}] = ?;", [record_id])
     if rowcount == 0:
@@ -1452,57 +1599,11 @@ def review_points_addition(addition_id: int):
     opinion = payload.get("approver_opinion")
     if status not in {"已通过", "已驳回"}:
         return fail("学习申请审批状态只能是已通过或已驳回")
-    addition = query_one(
-        """
-        SELECT a.*, p.deducted_points_total, p.add_count, v.vehicle_type, v.register_status, v.status_end_date
-        FROM dbo.t_points_addition_log AS a
-        JOIN dbo.t_scoring_period AS p ON p.period_id = a.period_id
-        JOIN dbo.t_vehicle AS v ON v.vehicle_id = a.vehicle_id
-        WHERE a.addition_id = ?;
-        """,
-        [addition_id],
-    )
-    if not addition:
-        return fail("学习申请不存在", 404)
-    if addition["status"] != "待审批":
-        return fail("该学习申请已经处理")
-    if status == "已通过":
-        if addition["vehicle_type"] != "A":
-            return fail("仅 A 类车辆可通过学习恢复权限")
-        if int(addition["deducted_points_total"]) not in (12, 24):
-            return fail("只有累计扣分为 12 或 24 分时才能通过学习申请")
-        if int(addition["add_count"]) >= 2:
-            return fail("本年度学习恢复次数已达上限")
-        execute_non_query(
-            """
-            UPDATE dbo.t_scoring_period
-            SET added_points_total = added_points_total + ?, add_count = add_count + 1
-            WHERE period_id = ?;
-            """,
-            [addition["addition_points"], addition["period_id"]],
-        )
-        expired = True
-        if addition["status_end_date"]:
-            row = query_one("SELECT CASE WHEN ? < CONVERT(date, SYSDATETIME()) THEN 1 ELSE 0 END AS expired;", [addition["status_end_date"]])
-            expired = bool(row and row["expired"] == 1)
-        if expired and addition["register_status"] == "暂停":
-            execute_non_query(
-                """
-                UPDATE dbo.t_vehicle
-                SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
-                WHERE vehicle_id = ? AND register_status = N'暂停';
-                """,
-                [addition["vehicle_id"]],
-            )
-    execute_non_query(
-        """
-        UPDATE dbo.t_points_addition_log
-        SET status = ?, approver_id = ?, approver_opinion = ?, approved_at = SYSDATETIME()
-        WHERE addition_id = ?;
-        """,
-        [status, user["user_id"], opinion, addition_id],
-    )
-    return ok({"id": addition_id}, "学习申请审批结果已保存")
+    result, error_message = apply_points_addition_review(addition_id, status, opinion, user["user_id"])
+    if error_message:
+        status_code = 404 if error_message == "学习申请不存在" else 400
+        return fail(error_message, status_code)
+    return ok(result, "学习申请审批结果已保存")
 
 
 @app.post("/api/scoring-periods/annual-reset")

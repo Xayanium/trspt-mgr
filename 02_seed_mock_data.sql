@@ -48,6 +48,11 @@ INSERT INTO dbo.t_user (username, password_hash, real_name, role, phone, departm
 (N'security01', N'FAKE_HASH_FOR_DEMO_ONLY', N'周老师', N'保卫处管理员', N'13700000002', @dept_security, NULL),
 (N'auditor01', N'FAKE_HASH_FOR_DEMO_ONLY', N'审核员王', N'审核员', N'13700000003', @dept_security, NULL),
 (N'zhangming', N'FAKE_HASH_FOR_DEMO_ONLY', N'张明', N'车主', N'13600000001', @dept_info, @reg_zhang),
+(N'lihua', N'FAKE_HASH_FOR_DEMO_ONLY', N'李华', N'车主', N'13600000002', @dept_info, @reg_li),
+(N'wangqiang', N'FAKE_HASH_FOR_DEMO_ONLY', N'王强', N'车主', N'13600000003', NULL, @reg_wang),
+(N'zhaoqian', N'FAKE_HASH_FOR_DEMO_ONLY', N'赵倩', N'车主', N'13600000004', NULL, @reg_zhao),
+(N'chenshifu', N'FAKE_HASH_FOR_DEMO_ONLY', N'陈师傅', N'车主', N'13600000005', @dept_logistics, @reg_chen),
+(N'zhoufangke', N'FAKE_HASH_FOR_DEMO_ONLY', N'周访客', N'车主', N'13600000006', NULL, @reg_visitor),
 (N'info_contact', N'FAKE_HASH_FOR_DEMO_ONLY', N'刘老师', N'单位联系人', N'13800000002', @dept_info, NULL);
 
 DECLARE @user_security INT = (SELECT user_id FROM dbo.t_user WHERE username = N'security01');
