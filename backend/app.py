@@ -213,7 +213,19 @@ def create_owner_user_for_registrant(payload: dict[str, Any], registrant_id: Any
     return username
 
 
+def expire_outdated_appointments() -> None:
+    execute_non_query(
+        """
+        UPDATE dbo.t_appointment
+        SET status = N'已过期'
+        WHERE status IN (N'待审批', N'已通过')
+          AND end_time < SYSDATETIME();
+        """
+    )
+
+
 def list_appointments(user: dict[str, Any], search: str | None, offset: int, limit: int):
+    expire_outdated_appointments()
     filters: list[str] = []
     params: list[Any] = []
     if search:
@@ -1289,12 +1301,12 @@ def options():
     if error:
         return error
     if is_admin(user):
-        vehicles_sql = "SELECT vehicle_id AS id, plate_number + N' / ' + vehicle_type AS label FROM dbo.t_vehicle ORDER BY vehicle_id DESC;"
+        vehicles_sql = "SELECT vehicle_id AS id, plate_number + N' / ' + vehicle_type + N' / ' + register_status AS label FROM dbo.t_vehicle ORDER BY vehicle_id DESC;"
         appointments_sql = "SELECT appointment_id AS id, plate_number + N' / ' + status AS label FROM dbo.t_appointment ORDER BY appointment_id DESC;"
         periods_sql = "SELECT period_id AS id, CONVERT(NVARCHAR(20), vehicle_id) + N' / ' + CONVERT(NVARCHAR(4), [year]) AS label FROM dbo.t_scoring_period ORDER BY period_id DESC;"
         scoped_params: list[Any] = []
     else:
-        vehicles_sql = "SELECT vehicle_id AS id, plate_number + N' / ' + vehicle_type AS label FROM dbo.t_vehicle WHERE registrant_id = ? ORDER BY vehicle_id DESC;"
+        vehicles_sql = "SELECT vehicle_id AS id, plate_number + N' / ' + vehicle_type + N' / ' + register_status AS label FROM dbo.t_vehicle WHERE registrant_id = ? ORDER BY vehicle_id DESC;"
         appointments_sql = """
             SELECT appointment_id AS id, plate_number + N' / ' + status AS label
             FROM dbo.t_appointment
@@ -1383,7 +1395,7 @@ def create_resource(resource_name: str):
     user, error = require_user()
     if error:
         return error
-    owner_creatable = {"appointments", "appeals", "points-additions"}
+    owner_creatable = {"vehicles", "appointments", "appeals", "points-additions"}
     if not is_admin(user) and not (is_owner(user) and resource_name in owner_creatable):
         return fail("当前用户无权新增该资源", 403)
     resource = get_resource(resource_name)
@@ -1403,12 +1415,19 @@ def create_resource(resource_name: str):
 
     if is_owner(user):
         registrant_id = user["registrant_id"]
-        if resource_name == "appointments":
-            vehicle = query_one("SELECT vehicle_id, plate_number, vehicle_type FROM dbo.t_vehicle WHERE vehicle_id = ? AND registrant_id = ?;", [payload.get("vehicle_id"), registrant_id])
+        if resource_name == "vehicles":
+            payload["registrant_id"] = registrant_id
+            payload["register_status"] = "待审批"
+            payload["status_start_date"] = None
+            payload["status_end_date"] = None
+        elif resource_name == "appointments":
+            vehicle = query_one("SELECT vehicle_id, plate_number, vehicle_type, register_status FROM dbo.t_vehicle WHERE vehicle_id = ? AND registrant_id = ?;", [payload.get("vehicle_id"), registrant_id])
             if not vehicle:
                 return fail("只能为本人车辆提交预约")
             if vehicle["vehicle_type"] != "B":
                 return fail("只有 B 类车辆需要提交预约入校")
+            if vehicle["register_status"] != "正常":
+                return fail("只有状态正常的 B 类车辆可以提交预约入校")
             payload["plate_number"] = vehicle["plate_number"]
             payload["appointer_type"] = "个人"
             payload["appointer_person_id"] = registrant_id
@@ -1502,6 +1521,27 @@ def update_resource(resource_name: str, record_id: str):
             status_code = 404 if error_message == "学习申请不存在" else 400
             return fail(error_message, status_code)
         return ok(result, "学习申请审批结果已保存")
+    if resource_name == "appointments":
+        status = payload.get("status")
+        if status not in {"待审批", "已通过", "已驳回", "已取消", "已过期"}:
+            return fail("预约状态只能是待审批、已通过、已驳回、已取消或已过期")
+        if status == "已通过":
+            reason = restriction_reason_for_appointment(record_id)
+            if reason:
+                return fail(f"预约审批被拦截：{reason}")
+        rowcount = execute_non_query(
+            """
+            UPDATE dbo.t_appointment
+            SET status = ?,
+                approver_id = ?,
+                approved_at = CASE WHEN ? = N'已通过' THEN SYSDATETIME() ELSE approved_at END
+            WHERE appointment_id = ?;
+            """,
+            [status, user["user_id"], status, record_id],
+        )
+        if rowcount == 0:
+            return fail("记录不存在", 404)
+        return ok({"affected": rowcount}, "预约状态已更新")
     columns, values = clean_payload(payload, resource.writable)
     if not columns:
         return fail("没有可更新的字段")
@@ -1545,7 +1585,6 @@ def review_appointment(appointment_id: int):
         return error
     payload = request.get_json(force=True) or {}
     status = payload.get("status", "已通过")
-    approver_id = payload.get("approver_id")
     if status not in {"已通过", "已驳回", "已取消"}:
         return fail("预约状态只能是已通过、已驳回或已取消")
     if status == "已通过":
@@ -1558,7 +1597,7 @@ def review_appointment(appointment_id: int):
         SET status = ?, approver_id = ?, approved_at = CASE WHEN ? = N'已通过' THEN SYSDATETIME() ELSE approved_at END
         WHERE appointment_id = ?;
         """,
-        [status, approver_id, status, appointment_id],
+        [status, user["user_id"], status, appointment_id],
     )
     if rowcount == 0:
         return fail("预约记录不存在", 404)

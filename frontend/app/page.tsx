@@ -78,7 +78,7 @@ type CurrentUser = {
 const adminRoles = new Set(["系统管理员", "保卫处管理员", "审核员"]);
 const ownerResourceKeys = new Set(["vehicles", "appointments", "violations", "penalties", "points-additions", "scoring-periods"]);
 const derivedResourceKeys = new Set(["penalties", "scoring-periods", "blacklists"]);
-const ownerCreatableResourceKeys = new Set(["appointments", "points-additions"]);
+const ownerCreatableResourceKeys = new Set(["vehicles", "appointments", "points-additions"]);
 
 function isAdminUser(user: CurrentUser | null) {
   return !!user && adminRoles.has(user.role);
@@ -381,11 +381,16 @@ function isBVehicleOption(option: OptionItem) {
   return parts[1]?.trim() === "B";
 }
 
-function optionsForDialog(config: ResourceConfig, options: OptionsPayload) {
+function isNormalVehicleOption(option: OptionItem) {
+  const parts = String(option.label).split(" / ");
+  return parts[2]?.trim() === "正常";
+}
+
+function optionsForDialog(config: ResourceConfig, options: OptionsPayload, canManage: boolean) {
   if (config.key !== "appointments") return options;
   return {
     ...options,
-    vehicles: (options.vehicles ?? []).filter(isBVehicleOption)
+    vehicles: (options.vehicles ?? []).filter((option) => isBVehicleOption(option) && (canManage || isNormalVehicleOption(option)))
   };
 }
 
@@ -474,7 +479,7 @@ function RecordDialog({
   canManage: boolean;
 }) {
   const title = row ? `编辑${config.title}` : `新增${config.title}`;
-  const dialogOptions = optionsForDialog(config, options);
+  const dialogOptions = optionsForDialog(config, options, canManage);
   const formRef = useRef<HTMLFormElement | null>(null);
   const [registrantDraft, setRegistrantDraft] = useState({
     name: "",
@@ -488,6 +493,7 @@ function RecordDialog({
   const [creatingRegistrant, setCreatingRegistrant] = useState(false);
   const [createdRegistrantId, setCreatedRegistrantId] = useState<string | number | null>(null);
   const [appointmentType, setAppointmentType] = useState("");
+  const [vehicleStatus, setVehicleStatus] = useState("");
   const showRegistrantCreator = config.key === "vehicles" && !row && !!onCreateRegistrant;
 
   useEffect(() => {
@@ -504,12 +510,18 @@ function RecordDialog({
       setCreatedRegistrantId(null);
       setCreatingRegistrant(false);
       setAppointmentType("");
+      setVehicleStatus("");
     }
   }, [open]);
 
   useEffect(() => {
     if (!open || config.key !== "appointments") return;
     setAppointmentType(inputValue(row?.appointer_type) || "个人");
+  }, [open, config.key, row]);
+
+  useEffect(() => {
+    if (!open || config.key !== "vehicles") return;
+    setVehicleStatus(inputValue(row?.register_status) || "待审批");
   }, [open, config.key, row]);
 
   useEffect(() => {
@@ -557,7 +569,14 @@ function RecordDialog({
       if (canManage) return !!row && ["status", "approver_id", "approver_opinion"].includes(field.name);
       return !row && ["vehicle_id", "addition_points", "proof_path"].includes(field.name);
     }
+    if (config.key === "vehicles") {
+      if (!canManage && !row && ["registrant_id", "register_status", "status_start_date", "status_end_date"].includes(field.name)) return false;
+      if (["status_start_date", "status_end_date"].includes(field.name)) return vehicleStatus === "暂停";
+      return true;
+    }
     if (config.key !== "appointments") return true;
+    if (canManage && row) return field.name === "status";
+    if (!canManage && !row && ["status", "approver_id"].includes(field.name)) return false;
     if (field.name === "plate_number") return false;
     if (field.name === "appointer_dept_id") return appointmentType === "单位";
     if (field.name === "appointer_person_id") return appointmentType === "个人";
@@ -573,6 +592,9 @@ function RecordDialog({
       if (field.name === "appointer_dept_id") return appointmentType === "单位";
       if (field.name === "appointer_person_id") return appointmentType === "个人";
       if (field.name === "appointer_house_id") return appointmentType === "房屋";
+    }
+    if (config.key === "vehicles" && !canManage && !row) {
+      return ["plate_number", "vehicle_type"].includes(field.name);
     }
     return isRequiredField(config.key, field.name);
   }
@@ -593,7 +615,9 @@ function RecordDialog({
                 const required = fieldIsRequired(field);
                 const fieldRow = config.key === "appointments" && !row && field.name === "appointer_type"
                   ? ({ appointer_type: "个人" } as Row)
-                  : row;
+                  : config.key === "vehicles" && !row && field.name === "register_status"
+                    ? ({ register_status: "待审批" } as Row)
+                    : row;
                 return (
                   <label key={field.name} className={field.type === "textarea" ? "md:col-span-2" : ""}>
                     <span className="mb-1.5 block text-sm font-medium text-slate-700">
@@ -605,7 +629,7 @@ function RecordDialog({
                       row={fieldRow}
                       options={dialogOptions}
                       required={required}
-                      onValueChange={field.name === "appointer_type" ? setAppointmentType : undefined}
+                      onValueChange={field.name === "appointer_type" ? setAppointmentType : field.name === "register_status" ? setVehicleStatus : undefined}
                     />
                   </label>
                 );
@@ -967,23 +991,31 @@ export default function Page() {
         showToast("请选择 B 类车辆", "只有 B 类车辆需要提交预约入校");
         return;
       }
+      if (!canManage && vehicleOption && !isNormalVehicleOption(vehicleOption)) {
+        showToast("请选择正常状态车辆", "只有状态正常的 B 类车辆可以提交预约入校");
+        return;
+      }
       if (!plateNumber) {
         showToast("请选择车辆", "预约入校需要先选择车辆，系统会自动带出车牌号");
         return;
       }
       payload.plate_number = plateNumber;
     }
-    if (editingRow) {
-      await apiSend(`/${activeConfig.key}/${editingRow[activeConfig.columns[0].key]}`, "PUT", payload);
-      showToast("更新成功", `${activeConfig.title}记录已保存`);
-    } else {
-      await apiSend(`/${activeConfig.key}`, "POST", payload);
-      showToast("新增成功", `${activeConfig.title}记录已创建`);
+    try {
+      if (editingRow) {
+        await apiSend(`/${activeConfig.key}/${editingRow[activeConfig.columns[0].key]}`, "PUT", payload);
+        showToast("更新成功", `${activeConfig.title}记录已保存`);
+      } else {
+        await apiSend(`/${activeConfig.key}`, "POST", payload);
+        showToast("新增成功", `${activeConfig.title}记录已创建`);
+      }
+      setDialogOpen(false);
+      setEditingRow(null);
+      await refreshTable();
+      await refreshDashboard();
+    } catch (error) {
+      showToast("操作失败", error instanceof Error ? error.message : "请检查输入后重试");
     }
-    setDialogOpen(false);
-    setEditingRow(null);
-    await refreshTable();
-    await refreshDashboard();
   }
 
   async function createRegistrantForVehicle(payload: Record<string, string | number | null>) {
@@ -1005,11 +1037,15 @@ export default function Page() {
       return;
     }
     if (!activeConfig || !deleteRow) return;
-    await apiSend(`/${activeConfig.key}/${deleteRow[activeConfig.columns[0].key]}`, "DELETE");
-    showToast("删除成功", `${activeConfig.title}记录已删除`);
-    setDeleteRow(null);
-    await refreshTable();
-    await refreshDashboard();
+    try {
+      await apiSend(`/${activeConfig.key}/${deleteRow[activeConfig.columns[0].key]}`, "DELETE");
+      showToast("删除成功", `${activeConfig.title}记录已删除`);
+      setDeleteRow(null);
+      await refreshTable();
+      await refreshDashboard();
+    } catch (error) {
+      showToast("删除失败", error instanceof Error ? error.message : "请稍后重试");
+    }
   }
 
   async function runGateCheck() {
