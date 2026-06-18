@@ -89,7 +89,7 @@ const requiredFields: Record<string, Set<string>> = {
   appointments: new Set(["vehicle_id", "appointer_type", "purpose", "start_time", "end_time", "status"]),
   violations: new Set(["vehicle_id", "rule_code", "violation_time", "location", "source", "status"]),
   penalties: new Set(["trigger_type", "penalty_type", "points_deducted", "status"]),
-  "points-additions": new Set(["period_id", "vehicle_id", "applicant_id", "addition_points", "status"]),
+  "points-additions": new Set(["period_id", "vehicle_id", "applicant_id", "status"]),
   "scoring-periods": new Set(["vehicle_id", "year", "initial_points", "deducted_points_total", "added_points_total", "add_count", "has_danger_violation", "is_active"]),
   blacklists: new Set(["vehicle_id", "blacklist_type", "reason", "source_type", "start_date", "is_active"]),
   "ai-query-logs": new Set(["requester_user_id", "natural_language_question", "generated_sql", "is_readonly", "execution_status"])
@@ -567,7 +567,7 @@ function RecordDialog({
   function shouldShowField(field: Field) {
     if (config.key === "points-additions") {
       if (canManage) return !!row && ["status", "approver_id", "approver_opinion"].includes(field.name);
-      return !row && ["vehicle_id", "addition_points", "proof_path"].includes(field.name);
+      return !row && ["vehicle_id", "proof_path"].includes(field.name);
     }
     if (config.key === "vehicles") {
       if (!canManage && !row && ["registrant_id", "register_status", "status_start_date", "status_end_date"].includes(field.name)) return false;
@@ -586,7 +586,7 @@ function RecordDialog({
   function fieldIsRequired(field: Field) {
     if (config.key === "points-additions") {
       if (canManage) return field.name === "status";
-      return ["vehicle_id", "addition_points"].includes(field.name);
+      return field.name === "vehicle_id";
     }
     if (config.key === "appointments") {
       if (field.name === "appointer_dept_id") return appointmentType === "单位";
@@ -1293,19 +1293,19 @@ export default function Page() {
                             {activeConfig.columns.map((column) => (
                               <th key={column.key} className="px-4 py-3 font-medium">{column.label}</th>
                             ))}
-                            {(canManage || activeConfig.key === "points-additions") && <th className="px-4 py-3 text-right font-medium">操作</th>}
+                            {canManage && <th className="px-4 py-3 text-right font-medium">操作</th>}
                           </tr>
                         </thead>
                         <tbody>
                           {loading ? (
                             <tr>
-                              <td colSpan={activeConfig.columns.length + ((canManage || activeConfig.key === "points-additions") ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">
+                              <td colSpan={activeConfig.columns.length + (canManage ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">
                                 <Loader2 className="mx-auto mb-2 animate-spin" size={24} /> 正在加载
                               </td>
                             </tr>
                           ) : table.items.length === 0 ? (
                             <tr>
-                              <td colSpan={activeConfig.columns.length + ((canManage || activeConfig.key === "points-additions") ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">暂无数据</td>
+                              <td colSpan={activeConfig.columns.length + (canManage ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">暂无数据</td>
                             </tr>
                           ) : (
                             table.items.map((row) => (
@@ -1315,9 +1315,9 @@ export default function Page() {
                                     {column.key.includes("status") || column.key === "is_active" ? <Badge value={row[column.key]} /> : <span className="line-clamp-2">{display(row[column.key])}</span>}
                                   </td>
                                 ))}
-                                {(canManage || activeConfig.key === "points-additions") && <td className="px-4 py-3">
+                                {canManage && <td className="px-4 py-3">
                                   <div className="flex justify-end gap-2">
-                                    {canManage && <button
+                                    <button
                                       onClick={() => {
                                         setEditingRow(row);
                                         setDialogOpen(true);
@@ -1325,13 +1325,13 @@ export default function Page() {
                                       className="inline-flex min-h-9 items-center gap-1 rounded-md border border-line px-3 text-sm hover:bg-white"
                                     >
                                       <SquarePen size={15} /> 编辑
-                                    </button>}
-                                    {(canManage || activeConfig.key === "points-additions") && <button
+                                    </button>
+                                    <button
                                       onClick={() => setDeleteRow(row)}
                                       className="inline-flex min-h-9 items-center gap-1 rounded-md border border-rose-200 px-3 text-sm text-rose-700 hover:bg-rose-50"
                                     >
                                       <Trash2 size={15} /> 删除
-                                    </button>}
+                                    </button>
                                     {canManage && activeConfig.key === "points-additions" && row.status === "待审批" && (
                                       <>
                                         <button onClick={() => reviewLearning(row.addition_id, "已通过")} className="inline-flex min-h-9 items-center gap-1 rounded-md border border-emerald-200 px-3 text-sm text-emerald-700 hover:bg-emerald-50">

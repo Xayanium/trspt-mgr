@@ -1124,8 +1124,8 @@ def apply_points_addition_review(addition_id: Any, status: str, opinion: str | N
     if status == "已通过" and old_status != "已通过":
         if addition["vehicle_type"] != "A":
             return None, "仅 A 类车辆可通过学习恢复权限"
-        if int(addition["deducted_points_total"]) not in (12, 24):
-            return None, "只有累计扣分为 12 或 24 分时才能通过学习申请"
+        if int(addition["deducted_points_total"]) < 12:
+            return None, "只有累计扣分达到 12 分及以上时才能通过学习申请"
         if int(addition["add_count"]) >= 2:
             return None, "本年度学习恢复次数已达上限"
         execute_non_query(
@@ -1134,7 +1134,7 @@ def apply_points_addition_review(addition_id: Any, status: str, opinion: str | N
             SET added_points_total = added_points_total + ?, add_count = add_count + 1
             WHERE period_id = ?;
             """,
-            [addition["addition_points"], addition["period_id"]],
+            [12, addition["period_id"]],
         )
         if addition["register_status"] == "暂停":
             execute_non_query(
@@ -1470,13 +1470,13 @@ def create_resource(resource_name: str):
             )
             if not period:
                 return fail("车辆没有活跃记分周期，无法提交学习申请")
-            if int(period["deducted_points_total"]) not in (12, 24):
-                return fail("只有累计扣分达到 12 或 24 分时才能提交学习申请")
+            if int(period["deducted_points_total"]) < 12:
+                return fail("只有累计扣分达到 12 分及以上时才能提交学习申请")
             if int(period["add_count"]) >= 2:
                 return fail("本年度学习恢复次数已达上限")
             payload["period_id"] = period["period_id"]
             payload["applicant_id"] = registrant_id
-            payload["addition_points"] = payload.get("addition_points") or 12
+            payload["addition_points"] = 12
             payload["status"] = "待审批"
             payload["approver_id"] = None
             payload["approver_opinion"] = None
