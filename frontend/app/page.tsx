@@ -177,7 +177,6 @@ const resourceConfigs: ResourceConfig[] = [
     ],
     fields: [
       { name: "vehicle_id", label: "车辆", type: "select", optionKey: "vehicles" },
-      { name: "appointment_id", label: "预约", type: "select", optionKey: "appointments" },
       { name: "rule_code", label: "违规规则", type: "select", optionKey: "rules" },
       { name: "violation_time", label: "违规时间", type: "datetime-local" },
       { name: "location", label: "地点" },
@@ -399,7 +398,7 @@ function payloadFromForm(form: HTMLFormElement, fields: Field[]) {
       payload[field.name] = null;
     } else if (field.type === "datetime-local") {
       payload[field.name] = value.length === 16 ? `${value.replace("T", " ")}:00` : value.replace("T", " ");
-    } else if (field.type === "number" || field.optionKey || field.name.endsWith("_id") || field.name === "is_active" || field.name === "is_readonly") {
+    } else if (field.type === "number" || field.name.endsWith("_id") || field.name === "is_active" || field.name === "is_readonly") {
       payload[field.name] = Number(value);
     } else {
       payload[field.name] = value;
