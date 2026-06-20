@@ -224,6 +224,96 @@ def expire_outdated_appointments() -> None:
     )
 
 
+def expire_outdated_enforcements() -> None:
+    execute_non_query(
+        """
+        UPDATE dbo.t_penalty
+        SET status = N'已完成'
+        WHERE status IN (N'待执行', N'执行中')
+          AND end_date IS NOT NULL
+          AND end_date < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_vehicle
+        SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
+        WHERE register_status = N'暂停'
+          AND status_end_date IS NOT NULL
+          AND status_end_date < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_blacklist
+        SET is_active = 0
+        WHERE is_active = 1
+          AND end_date IS NOT NULL
+          AND end_date < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_registrant
+        SET appointment_status = N'正常', appointment_suspend_until = NULL
+        WHERE appointment_status = N'暂停'
+          AND appointment_suspend_until IS NOT NULL
+          AND appointment_suspend_until < CONVERT(date, SYSDATETIME());
+        """
+    )
+    execute_non_query(
+        """
+        UPDATE dbo.t_house
+        SET appointment_status = N'正常', appointment_suspend_until = NULL
+        WHERE appointment_status = N'暂停'
+          AND appointment_suspend_until IS NOT NULL
+          AND appointment_suspend_until < CONVERT(date, SYSDATETIME());
+        """
+    )
+
+
+def sync_blacklists_for_penalty(penalty_id: Any) -> None:
+    penalty = query_one(
+        """
+        SELECT penalty_id, end_date, status
+        FROM dbo.t_penalty
+        WHERE penalty_id = ?;
+        """,
+        [penalty_id],
+    )
+    if not penalty:
+        return
+    execute_non_query(
+        """
+        UPDATE dbo.t_blacklist
+        SET end_date = ?,
+            is_active = CASE
+                WHEN ? IN (N'已完成', N'已撤销') THEN 0
+                WHEN ? IS NOT NULL AND ? < CONVERT(date, SYSDATETIME()) THEN 0
+                ELSE 1
+            END
+        WHERE penalty_id = ?;
+        """,
+        [penalty["end_date"], penalty["status"], penalty["end_date"], penalty["end_date"], penalty_id],
+    )
+
+
+def sync_penalty_status_from_end_date(penalty_id: Any) -> None:
+    execute_non_query(
+        """
+        UPDATE dbo.t_penalty
+        SET status = CASE
+            WHEN end_date < CONVERT(date, SYSDATETIME()) THEN N'已完成'
+            ELSE N'执行中'
+        END
+        WHERE penalty_id = ?
+          AND end_date IS NOT NULL
+          AND status <> N'已撤销';
+        """,
+        [penalty_id],
+    )
+
+
 def list_appointments(user: dict[str, Any], search: str | None, offset: int, limit: int):
     expire_outdated_appointments()
     filters: list[str] = []
@@ -1211,6 +1301,8 @@ def dashboard():
     user, error = require_user()
     if error:
         return error
+    expire_outdated_appointments()
+    expire_outdated_enforcements()
     if is_admin(user):
         sql = """
         SELECT
@@ -1300,6 +1392,8 @@ def options():
     user, error = require_user()
     if error:
         return error
+    expire_outdated_appointments()
+    expire_outdated_enforcements()
     if is_admin(user):
         vehicles_sql = "SELECT vehicle_id AS id, plate_number + N' / ' + vehicle_type + N' / ' + register_status AS label FROM dbo.t_vehicle ORDER BY vehicle_id DESC;"
         appointments_sql = "SELECT appointment_id AS id, plate_number + N' / ' + status AS label FROM dbo.t_appointment ORDER BY appointment_id DESC;"
@@ -1333,6 +1427,8 @@ def list_resource(resource_name: str):
     user, error = require_user()
     if error:
         return error
+    if resource_name in {"vehicles", "penalties", "blacklists", "registrants", "houses"}:
+        expire_outdated_enforcements()
     resource = get_resource(resource_name)
     allowed, (scope_where, scope_params) = resource_access(resource_name, user)
     if not allowed:
@@ -1378,6 +1474,8 @@ def get_one_resource(resource_name: str, record_id: str):
     user, error = require_user()
     if error:
         return error
+    if resource_name in {"vehicles", "penalties", "blacklists", "registrants", "houses"}:
+        expire_outdated_enforcements()
     resource = get_resource(resource_name)
     allowed, (scope_where, scope_params) = resource_access(resource_name, user)
     if not allowed:
@@ -1552,6 +1650,10 @@ def update_resource(resource_name: str, record_id: str):
     )
     if rowcount == 0:
         return fail("记录不存在", 404)
+    if resource_name == "penalties":
+        sync_penalty_status_from_end_date(record_id)
+        sync_blacklists_for_penalty(record_id)
+        expire_outdated_enforcements()
     return ok({"affected": rowcount}, f"{resource.title}已更新")
 
 
@@ -1669,34 +1771,7 @@ def annual_reset():
             created += 1
         else:
             execute_non_query("UPDATE dbo.t_scoring_period SET is_active = 1 WHERE period_id = ?;", [existing["period_id"]])
-    execute_non_query(
-        """
-        UPDATE dbo.t_vehicle
-        SET register_status = N'正常', status_start_date = NULL, status_end_date = NULL
-        WHERE register_status = N'暂停' AND status_end_date IS NOT NULL AND status_end_date < CONVERT(date, SYSDATETIME());
-        """
-    )
-    execute_non_query(
-        """
-        UPDATE dbo.t_blacklist
-        SET is_active = 0
-        WHERE is_active = 1 AND end_date IS NOT NULL AND end_date < CONVERT(date, SYSDATETIME());
-        """
-    )
-    execute_non_query(
-        """
-        UPDATE dbo.t_registrant
-        SET appointment_status = N'正常', appointment_suspend_until = NULL
-        WHERE appointment_status = N'暂停' AND appointment_suspend_until IS NOT NULL AND appointment_suspend_until < CONVERT(date, SYSDATETIME());
-        """
-    )
-    execute_non_query(
-        """
-        UPDATE dbo.t_house
-        SET appointment_status = N'正常', appointment_suspend_until = NULL
-        WHERE appointment_status = N'暂停' AND appointment_suspend_until IS NOT NULL AND appointment_suspend_until < CONVERT(date, SYSDATETIME());
-        """
-    )
+    expire_outdated_enforcements()
     return ok({"year": year, "created_periods": created}, "年度重置完成")
 
 
@@ -1705,6 +1780,8 @@ def gate_check():
     user, error = require_admin()
     if error:
         return error
+    expire_outdated_appointments()
+    expire_outdated_enforcements()
     plate_number = request.args.get("plate", "").strip()
     if not plate_number:
         return fail("请提供车牌号参数 plate")

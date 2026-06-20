@@ -889,6 +889,7 @@ export default function Page() {
     (canManage && !["appointments", "points-additions"].includes(activeConfig.key)) ||
     (!canManage && ownerCreatableResourceKeys.has(activeConfig.key))
   );
+  const showRowActions = canManage && !["blacklists", "scoring-periods"].includes(activeConfig?.key ?? "");
   const showDashboardTools = activeKey === "dashboard";
   const showAiDemo = canManage && (activeKey === "dashboard" || activeKey === "ai-query-logs");
 
@@ -1293,19 +1294,19 @@ export default function Page() {
                             {activeConfig.columns.map((column) => (
                               <th key={column.key} className="px-4 py-3 font-medium">{column.label}</th>
                             ))}
-                            {canManage && <th className="px-4 py-3 text-right font-medium">操作</th>}
+                            {showRowActions && <th className="px-4 py-3 text-right font-medium">操作</th>}
                           </tr>
                         </thead>
                         <tbody>
                           {loading ? (
                             <tr>
-                              <td colSpan={activeConfig.columns.length + (canManage ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">
+                              <td colSpan={activeConfig.columns.length + (showRowActions ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">
                                 <Loader2 className="mx-auto mb-2 animate-spin" size={24} /> 正在加载
                               </td>
                             </tr>
                           ) : table.items.length === 0 ? (
                             <tr>
-                              <td colSpan={activeConfig.columns.length + (canManage ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">暂无数据</td>
+                              <td colSpan={activeConfig.columns.length + (showRowActions ? 1 : 0)} className="px-4 py-12 text-center text-slate-500">暂无数据</td>
                             </tr>
                           ) : (
                             table.items.map((row) => (
@@ -1315,7 +1316,7 @@ export default function Page() {
                                     {column.key.includes("status") || column.key === "is_active" ? <Badge value={row[column.key]} /> : <span className="line-clamp-2">{display(row[column.key])}</span>}
                                   </td>
                                 ))}
-                                {canManage && <td className="px-4 py-3">
+                                {showRowActions && <td className="px-4 py-3">
                                   <div className="flex justify-end gap-2">
                                     <button
                                       onClick={() => {
